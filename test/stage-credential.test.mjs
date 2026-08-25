@@ -13,7 +13,7 @@ test("SC-01 stages any non-empty Chrome Session Credential in a mode-0600 file",
     const directory = mkdtempSync(join(tmpdir(), "session-credential-test-"));
     const destination = join(directory, "session-credential");
     const result = spawnSync(process.execPath, [script, destination], {
-      env: { ...process.env, SESSION_CREDENTIAL: credential },
+      env: { ...process.env, SESSION_PASSWORD: credential },
     });
 
     assert.equal(result.status, 0, result.stderr.toString());
@@ -29,12 +29,12 @@ test("SC-01 rejects an empty Session Credential without writing it", () => {
   const directory = mkdtempSync(join(tmpdir(), "session-credential-test-"));
   const destination = join(directory, "session-credential");
   const result = spawnSync(process.execPath, [script, destination], {
-    env: { ...process.env, SESSION_CREDENTIAL: "" },
+    env: { ...process.env, SESSION_PASSWORD: "" },
   });
 
   assert.notEqual(result.status, 0);
   assert.equal(result.stdout.toString(), "");
-  assert.doesNotMatch(result.stderr.toString(), /SESSION_CREDENTIAL=/);
+  assert.doesNotMatch(result.stderr.toString(), /SESSION_PASSWORD=/);
   assert.throws(() => statSync(destination), { code: "ENOENT" });
   rmSync(directory, { recursive: true });
 });

@@ -34,7 +34,7 @@ test("WF-01 invalid raw dispatch values fail in the secret-free first step", () 
     .map((line) => line.slice(10))
     .join("\n");
 
-  assert.doesNotMatch(match[0], /secrets\.|SESSION_CREDENTIAL/);
+  assert.doesNotMatch(match[0], /secrets\.|SESSION_PASSWORD/);
 
   for (const service of ["chrome", "motrix", "openlist"]) {
     const result = spawnSync("bash", ["-euo", "pipefail", "-c", script], {
@@ -161,11 +161,11 @@ test("WF-01 workflow pins its immutable execution policy", () => {
     /- name: Stage Motrix Operator Token\n([\s\S]*?)\n\s+- name: Stage Rclone configuration/,
   )?.[1] ?? "";
   assert.match(chromeCredentialStep, /if: \$\{\{ inputs\.service == 'chrome' \|\| inputs\.service == 'openlist' \}\}/);
-  assert.match(chromeCredentialStep, /SESSION_CREDENTIAL: \$\{\{ secrets\.SESSION_CREDENTIAL \}\}/);
+  assert.match(chromeCredentialStep, /SESSION_PASSWORD: \$\{\{ secrets\.SESSION_PASSWORD \}\}/);
   assert.doesNotMatch(chromeCredentialStep, /MOTRIX_OPERATOR_TOKEN/);
   assert.match(motrixCredentialStep, /if: \$\{\{ inputs\.service == 'motrix' \}\}/);
   assert.match(motrixCredentialStep, /MOTRIX_OPERATOR_TOKEN: \$\{\{ secrets\.MOTRIX_OPERATOR_TOKEN \}\}/);
-  assert.doesNotMatch(motrixCredentialStep, /SESSION_CREDENTIAL/);
+  assert.doesNotMatch(motrixCredentialStep, /SESSION_PASSWORD/);
   assert.match(workflow, /credential_file="\$RUNNER_TEMP\/session-credential"/);
   assert.match(workflow, /if \[\[ "\$INPUT_SERVICE" == "motrix" \]\]; then\n\s+credential_file="\$RUNNER_TEMP\/motrix-operator-token"/);
   assert.match(workflow, /--credential-file "\$credential_file"/);

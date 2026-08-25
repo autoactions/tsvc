@@ -6,8 +6,8 @@ import { isAbsolute } from "node:path";
 import { isSessionCredential } from "../src/session-credential.mjs";
 
 const destination = process.argv[2];
-const credential = process.env.SESSION_CREDENTIAL ?? "";
-delete process.env.SESSION_CREDENTIAL;
+const credential = process.env.SESSION_PASSWORD ?? "";
+delete process.env.SESSION_PASSWORD;
 
 if (
   !destination ||

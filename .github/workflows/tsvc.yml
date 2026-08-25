@@ -154,7 +154,7 @@ jobs:
         if: ${{ inputs.service == 'chrome' || inputs.service == 'openlist' }}
         shell: bash
         env:
-          SESSION_CREDENTIAL: ${{ secrets.SESSION_CREDENTIAL }}
+          SESSION_PASSWORD: ${{ secrets.SESSION_PASSWORD }}
         run: node scripts/stage-credential.mjs "$RUNNER_TEMP/session-credential"
 
       - name: Stage Motrix Operator Token

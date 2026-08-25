@@ -1,0 +1,165 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { runSelectedService } from "../src/service-module.mjs";
+
+const enabled = process.env.RUN_LIVE_ADAPTER_TESTS === "1";
+const sessionCredential = "123456";
+const motrixOperatorToken = "M".repeat(43);
+
+/** @param {"chrome" | "motrix"} service */
+function servicePort(service) {
+  return service === "chrome" ? 58080 : 58081;
+}
+
+/** @param {"chrome" | "motrix"} service @param {string} path @param {Record<string, string>} headers */
+function websocketStatus(service, path, headers) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(`http://127.0.0.1:${servicePort(service)}${path}`, {
+      headers: {
+        ...headers,
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-key": Buffer.alloc(16, 1).toString("base64"),
+        "sec-websocket-version": "13",
+      },
+    });
+    request.once("upgrade", (response, socket) => {
+      socket.destroy();
+      resolve(response.statusCode);
+    });
+    request.once("response", (response) => {
+      response.resume();
+      resolve(response.statusCode);
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+/** @param {"chrome" | "motrix"} service @param {string} credential @param {string[]} [additionalSensitiveValues] */
+function assertLiveIsolation(service, credential, additionalSensitiveValues = []) {
+  const ids = execFileSync("docker", ["ps", "--quiet", "--filter", `publish=${servicePort(service)}`], { encoding: "utf8" })
+    .trim().split("\n").filter(Boolean);
+  assert.equal(ids.length, 1);
+  const id = ids[0];
+  assert.ok(id);
+  const metadataText = execFileSync("docker", ["inspect", id], { encoding: "utf8" });
+  const [metadata] = JSON.parse(metadataText);
+  assert.equal(metadata.HostConfig.Privileged, false);
+  assert.equal(metadata.HostConfig.NetworkMode, "bridge");
+  assert.deepEqual(metadata.HostConfig.CapAdd, null);
+  assert.deepEqual(metadata.HostConfig.Devices, []);
+  assert.equal(Object.keys(metadata.HostConfig.PortBindings).length, 1);
+  const logs = execFileSync("docker", ["logs", "--tail", "200", id], {
+    encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  const processes = execFileSync("docker", ["top", id, "-eo", "pid,args"], { encoding: "utf8" });
+  const observableState = `${metadataText}${logs}${processes}`;
+  for (const value of [credential, ...additionalSensitiveValues]) {
+    assert.doesNotMatch(observableState, new RegExp(value));
+  }
+}
+
+/** @param {"chrome" | "motrix"} service */
+async function withLiveService(service) {
+  const root = mkdtempSync(join(tmpdir(), `live-${service}-`));
+  const credentialFile = join(root, service === "chrome" ? "session-credential" : "motrix-operator-token");
+  const rcloneConfigFile = join(root, "rclone.conf");
+  const credential = service === "chrome" ? sessionCredential : motrixOperatorToken;
+  writeFileSync(credentialFile, credential, { mode: 0o600 });
+  if (service === "motrix") writeFileSync(rcloneConfigFile, "[archive]\ntype = memory\n", { mode: 0o600 });
+  const previousRunnerTemp = process.env.RUNNER_TEMP;
+  process.env.RUNNER_TEMP = root;
+  const cancellation = new AbortController();
+  const serviceRun = runSelectedService({
+    service,
+    sessionAddress: `http://127.0.0.1:${servicePort(service)}`,
+    credentialFile: credentialFile,
+    cancellation: cancellation.signal,
+    ...(service === "motrix"
+      ? {
+          upload: {
+            rcloneConfigFile,
+            destinations: [{
+              id: "drive",
+              localRoot: "/downloads/drive",
+              destination: "archive:motrix",
+            }],
+          },
+        }
+      : {}),
+  });
+  try {
+    await serviceRun.ready;
+    return { cancellation, previousRunnerTemp, root, serviceRun };
+  } catch (error) {
+    cancellation.abort();
+    await serviceRun.finished;
+    rmSync(root, { recursive: true });
+    if (previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = previousRunnerTemp;
+    throw error;
+  }
+}
+
+test("AU-01 pinned Chrome enforces native HTTP and GUI WebSocket authentication", { skip: !enabled, timeout: 300_000 }, async () => {
+  const live = await withLiveService("chrome");
+  try {
+    const wrong = `Basic ${Buffer.from("session:wrong").toString("base64")}`;
+    const correct = `Basic ${Buffer.from(`session:${sessionCredential}`).toString("base64")}`;
+    assertLiveIsolation("chrome", sessionCredential);
+    assert.equal((await fetch("http://127.0.0.1:58080/", { headers: { authorization: wrong } })).status, 401);
+    assert.equal((await fetch("http://127.0.0.1:58080/", { headers: { authorization: correct } })).status, 200);
+    assert.equal(await websocketStatus("chrome", "/websocket", { authorization: wrong }), 401);
+    assert.equal(await websocketStatus("chrome", "/websocket", { authorization: correct }), 101);
+  } finally {
+    live.cancellation.abort();
+    assert.deepEqual(await live.serviceRun.finished, { status: "success" });
+    rmSync(live.root, { recursive: true });
+    if (live.previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = live.previousRunnerTemp;
+  }
+});
+
+test("AU-02 pinned Motrix protects operational HTTP and /rpc/events", { skip: !enabled, timeout: 300_000 }, async () => {
+  const live = await withLiveService("motrix");
+  try {
+    const endpoint = "http://127.0.0.1:58081/rpc/query/query%3AlistTasks";
+    const request = { method: "POST", body: '{"args":[]}', headers: { "content-type": "application/json" } };
+    assertLiveIsolation("motrix", motrixOperatorToken);
+    assert.equal((await fetch("http://127.0.0.1:58081/")).status, 200);
+    assert.equal((await fetch("http://127.0.0.1:58081/healthz")).status, 200);
+    assert.equal((await fetch(endpoint, request)).status, 401);
+    assert.equal((await fetch(endpoint, { ...request, headers: { ...request.headers, authorization: "Bearer wrong" } })).status, 401);
+    assert.equal((await fetch(endpoint, { ...request, headers: { ...request.headers, authorization: `Bearer ${motrixOperatorToken}` } })).status, 200);
+    assert.equal(await websocketStatus("motrix", "/rpc/events", { authorization: "Bearer wrong" }), 401);
+    assert.equal(await websocketStatus("motrix", "/rpc/events", { authorization: `Bearer ${motrixOperatorToken}` }), 101);
+    const wrongLogin = await fetch("http://127.0.0.1:58081/rpc/auth/login", {
+      method: "POST", headers: { "content-type": "application/json" }, body: '{"token":"wrong"}',
+    });
+    assert.equal(wrongLogin.status, 401);
+    const login = await fetch("http://127.0.0.1:58081/rpc/auth/login", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: motrixOperatorToken }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
+    assert.match(cookie ?? "", /^mtx_op=/);
+    assert.doesNotMatch(cookie ?? "", new RegExp(motrixOperatorToken));
+    assert.ok(cookie);
+    assert.equal((await fetch(endpoint, { ...request, headers: { ...request.headers, cookie } })).status, 200);
+    assert.equal(await websocketStatus("motrix", "/rpc/events", { cookie: cookie ?? "" }), 101);
+    assertLiveIsolation("motrix", motrixOperatorToken, [cookie.slice("mtx_op=".length)]);
+  } finally {
+    live.cancellation.abort();
+    assert.deepEqual(await live.serviceRun.finished, { status: "success" });
+    rmSync(live.root, { recursive: true });
+    if (live.previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = live.previousRunnerTemp;
+  }
+});

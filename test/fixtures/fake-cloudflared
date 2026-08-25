@@ -1,0 +1,52 @@
+#!/usr/bin/env node
+
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const requestedLogBytes = Number(process.env.FAKE_LOG_BYTES ?? 0);
+let emittedLogBytes = 0;
+let logComplete = requestedLogBytes === 0;
+
+if (process.argv.includes("--version")) {
+  process.stdout.write("cloudflared version 2026.8.2\n");
+  process.exit(0);
+}
+
+if (process.env.FAKE_CLOUDFLARED_ARGUMENTS) {
+  writeFileSync(
+    process.env.FAKE_CLOUDFLARED_ARGUMENTS,
+    JSON.stringify(process.argv.slice(2)),
+  );
+}
+
+const server = createServer((request, response) => {
+  if (request.url === "/quicktunnel") {
+    if (!logComplete) {
+      response.writeHead(503).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ hostname: process.env.FAKE_SESSION_ADDRESS }));
+    return;
+  }
+  if (request.url === "/ready") {
+    response.writeHead(200).end("ready");
+    return;
+  }
+  response.writeHead(404).end();
+});
+
+server.listen(49312, "127.0.0.1", emitLogChunk);
+function emitLogChunk() {
+  if (emittedLogBytes >= requestedLogBytes) {
+    logComplete = true;
+    return;
+  }
+  const length = Math.min(64 * 1024, requestedLogBytes - emittedLogBytes);
+  emittedLogBytes += length;
+  if (process.stdout.write(Buffer.alloc(length, "x"))) setImmediate(emitLogChunk);
+  else process.stdout.once("drain", emitLogChunk);
+}
+const stop = () => server.close(() => process.exit(0));
+process.on("SIGINT", stop);
+process.on("SIGTERM", stop);

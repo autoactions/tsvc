@@ -1,0 +1,230 @@
+name: tsvc
+run-name: service:${{ inputs.service }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service
+        required: true
+        type: choice
+        options:
+          - chrome
+          - motrix
+          - openlist
+
+permissions: {}
+
+jobs:
+  session:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    concurrency:
+      group: ${{ inputs.service == 'openlist' && 'tsvc-serialized' || format('tsvc-quick-{0}', github.run_id) }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Validate closed inputs
+        env:
+          INPUT_SERVICE: ${{ inputs.service }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$INPUT_SERVICE" in
+            chrome|motrix|openlist) ;;
+            *) echo "Invalid Service" >&2; exit 2 ;;
+          esac
+
+      - name: Validate Motrix upload configuration
+        env:
+          INPUT_SERVICE: ${{ inputs.service }}
+          RCLONE_CONFIG_CONFIGURED: ${{ secrets.RCLONE_CONFIG != '' }}
+          RCLONE_DESTINATIONS: ${{ vars.RCLONE_DESTINATIONS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$INPUT_SERVICE" != "motrix" ]]; then
+            exit 0
+          fi
+          if [[ "$RCLONE_CONFIG_CONFIGURED" != "true" || -z "$RCLONE_DESTINATIONS" ]]; then
+            echo "Incomplete Motrix upload configuration" >&2
+            exit 2
+          fi
+          node -e '
+            const fs = require("node:fs");
+            const [source, output] = process.argv.slice(1);
+            try {
+              const entries = JSON.parse(source);
+              if (!Array.isArray(entries) || entries.length === 0) throw new Error();
+              const ids = new Set();
+              for (const entry of entries) {
+                if (
+                  !entry || typeof entry !== "object" || Array.isArray(entry) ||
+                  Object.keys(entry).some((key) => key !== "id" && key !== "destination") ||
+                  typeof entry.id !== "string" ||
+                  !/^[a-z0-9][a-z0-9-]{0,62}$/.test(entry.id) || ids.has(entry.id) ||
+                  typeof entry.destination !== "string"
+                ) throw new Error();
+                const separator = entry.destination.indexOf(":");
+                const remote = entry.destination.slice(0, separator);
+                if (
+                  separator < 1 || !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(remote) ||
+                  /[\u0000-\u001f\u007f]/.test(entry.destination)
+                ) throw new Error();
+                ids.add(entry.id);
+              }
+              const descriptor = fs.openSync(output, "wx", 0o600);
+              try { fs.writeFileSync(descriptor, JSON.stringify(entries)); }
+              finally { fs.closeSync(descriptor); }
+            } catch {
+              process.stderr.write("Invalid Rclone Destinations\n");
+              process.exitCode = 2;
+            }
+          ' "$RCLONE_DESTINATIONS" "$RUNNER_TEMP/rclone-destinations.json"
+
+      - name: Validate OpenList database configuration
+        env:
+          INPUT_SERVICE: ${{ inputs.service }}
+          OPENLIST_DATABASE_CONFIGURED: ${{ secrets.OPENLIST_DATABASE != '' }}
+          OPENLIST_DATABASE_CA_CONFIGURED: ${{ secrets.OPENLIST_DATABASE_CA != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$INPUT_SERVICE" != "openlist" ]]; then
+            exit 0
+          fi
+          if [[ "$OPENLIST_DATABASE_CONFIGURED" != "true" || "$OPENLIST_DATABASE_CA_CONFIGURED" != "true" ]]; then
+            echo "Incomplete OpenList database configuration" >&2
+            exit 2
+          fi
+
+      - name: Record Session start
+        shell: bash
+        run: |
+          set -euo pipefail
+          date +%s > "$RUNNER_TEMP/session-started-epoch"
+
+      # actions/checkout v4.2.2, reviewed 2026-08-21.
+      - name: Check out repository implementation
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          lfs: false
+          submodules: false
+
+      - name: Acquire pinned cloudflared
+        shell: bash
+        run: scripts/acquire-cloudflared.sh
+
+      - name: Record immutable runtime identities
+        shell: bash
+        env:
+          INPUT_SERVICE: ${{ inputs.service }}
+        run: |
+          set -euo pipefail
+          printf 'Runner image: %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          docker version --format 'Docker server: {{.Server.Version}}'
+          "$RUNNER_TEMP/cloudflared" --version
+          case "$INPUT_SERVICE" in
+            chrome) printf '%s\n' 'Chrome: lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12' ;;
+            motrix)
+              printf '%s\n' 'Motrix: ghcr.io/agalwood/motrix-server@sha256:d3ecb7e7233d25ca1e947a386ee7c885f8c61fbabf7af4754a65d9d7fbdefa6f'
+              printf '%s\n' 'Rclone: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548'
+              ;;
+            openlist) printf '%s\n' 'OpenList AIO: openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb' ;;
+            *) exit 2 ;;
+          esac
+
+      - name: Stage OpenList database configuration
+        if: ${{ inputs.service == 'openlist' }}
+        shell: bash
+        env:
+          OPENLIST_DATABASE: ${{ secrets.OPENLIST_DATABASE }}
+        run: node scripts/stage-openlist-database.mjs "$RUNNER_TEMP/openlist-database.json"
+
+      - name: Stage OpenList database CA
+        if: ${{ inputs.service == 'openlist' }}
+        shell: bash
+        env:
+          OPENLIST_DATABASE_CA: ${{ secrets.OPENLIST_DATABASE_CA }}
+        run: node scripts/stage-openlist-database-ca.mjs "$RUNNER_TEMP/openlist-database-ca.pem"
+
+      - name: Stage Session Credential
+        if: ${{ inputs.service == 'chrome' || inputs.service == 'openlist' }}
+        shell: bash
+        env:
+          SESSION_CREDENTIAL: ${{ secrets.SESSION_CREDENTIAL }}
+        run: node scripts/stage-credential.mjs "$RUNNER_TEMP/session-credential"
+
+      - name: Stage Motrix Operator Token
+        if: ${{ inputs.service == 'motrix' }}
+        shell: bash
+        env:
+          MOTRIX_OPERATOR_TOKEN: ${{ secrets.MOTRIX_OPERATOR_TOKEN }}
+        run: node scripts/stage-motrix-operator-token.mjs "$RUNNER_TEMP/motrix-operator-token"
+
+      - name: Stage Rclone configuration
+        if: ${{ inputs.service == 'motrix' }}
+        shell: bash
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: node scripts/stage-rclone-config.mjs "$RUNNER_TEMP/rclone.conf"
+
+      - name: Run Session
+        id: session
+        shell: bash
+        env:
+          INPUT_SERVICE: ${{ inputs.service }}
+        run: |
+          set -euo pipefail
+          upload_args=()
+          openlist_args=()
+          credential_file="$RUNNER_TEMP/session-credential"
+          if [[ "$INPUT_SERVICE" == "motrix" ]]; then
+            credential_file="$RUNNER_TEMP/motrix-operator-token"
+            upload_args+=(
+              --rclone-config-file "$RUNNER_TEMP/rclone.conf"
+              --rclone-destinations-file "$RUNNER_TEMP/rclone-destinations.json"
+            )
+          fi
+          if [[ "$INPUT_SERVICE" == "openlist" ]]; then
+            openlist_args+=(
+              --openlist-database-file "$RUNNER_TEMP/openlist-database.json"
+              --openlist-database-ca-file "$RUNNER_TEMP/openlist-database-ca.pem"
+            )
+          fi
+          node src/session.mjs \
+            --service "$INPUT_SERVICE" \
+            --credential-file "$credential_file" \
+            --cloudflared "$RUNNER_TEMP/cloudflared" \
+            --started-epoch-file "$RUNNER_TEMP/session-started-epoch" \
+            "${upload_args[@]}" \
+            "${openlist_args[@]}"
+
+      - name: Record pre-readiness failure
+        if: ${{ failure() && steps.session.outcome != 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q '^## Session' "$GITHUB_STEP_SUMMARY" 2>/dev/null; then
+            printf '%s\n' '## Session failed' '' 'Phase: startup' 'Diagnostic: Session startup failed before readiness.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Remove workflow-owned temporary files
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f -- \
+            "$RUNNER_TEMP/cloudflared" \
+            "$RUNNER_TEMP/cloudflared.log" \
+            "$RUNNER_TEMP/cloudflared.log.1" \
+            "$RUNNER_TEMP/cloudflared.log.2" \
+            "$RUNNER_TEMP/rclone.conf" \
+            "$RUNNER_TEMP/rclone-destinations.json" \
+            "$RUNNER_TEMP/session-started-epoch" \
+            "$RUNNER_TEMP/session-credential" \
+            "$RUNNER_TEMP/motrix-operator-token" \
+            "$RUNNER_TEMP/openlist-database.json" \
+            "$RUNNER_TEMP/openlist-database-ca.pem"

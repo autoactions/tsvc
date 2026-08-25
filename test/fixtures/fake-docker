@@ -1,0 +1,106 @@
+#!/usr/bin/env node
+
+import { appendFileSync, chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_DOCKER_LOG, `${JSON.stringify(args)}\n`);
+const stoppedMarker = `${process.env.FAKE_DOCKER_LOG}.stopped`;
+const motrixTokenPreparedMarker = `${process.env.FAKE_DOCKER_LOG}.motrix-token-prepared`;
+const openlistPreparedMarker = `${process.env.FAKE_DOCKER_LOG}.openlist-prepared`;
+
+switch (args[0]) {
+  case "pull":
+    break;
+  case "stop":
+    writeFileSync(stoppedMarker, "stopped");
+    break;
+  case "rm":
+    break;
+  case "volume":
+    if (args[1] === "create") process.stdout.write(`${args[2]}\n`);
+    else if (args[1] !== "rm") process.exitCode = 2;
+    break;
+  case "run":
+    if (args.includes("--detach") && existsSync(stoppedMarker)) unlinkSync(stoppedMarker);
+    if (args.some((argument) => argument.endsWith("-openlist-permissions"))) {
+      const mounts = args.filter((argument) => argument.startsWith("type=bind,source=") && argument.includes("target=/run/secrets/"));
+      const sources = mounts.map((mount) => mount.match(/(?:^|,)source=([^,]+),target=/)?.[1]).filter(Boolean);
+      if (sources.length !== 3) {
+        process.exitCode = 2;
+        break;
+      }
+      for (const source of sources) chmodSync(source, 0o600);
+      writeFileSync(openlistPreparedMarker, "1001:1001:600");
+    } else if (args.some((argument) => argument.endsWith("-openlist-configuration"))) {
+      if (!existsSync(openlistPreparedMarker)) process.exitCode = 1;
+    } else if (args.some((argument) => argument.endsWith("-openlist-bootstrap"))) {
+      if (!existsSync(openlistPreparedMarker)) process.exitCode = 1;
+    } else if (args.some((argument) => argument.endsWith("-token-permissions"))) {
+      if (existsSync(`${process.env.FAKE_DOCKER_LOG}.token-permission-hang`)) {
+        setInterval(() => {}, 1_000);
+        break;
+      }
+      if (existsSync(`${process.env.FAKE_DOCKER_LOG}.token-permission-failure`)) {
+        process.exitCode = 1;
+        break;
+      }
+      const tokenMount = args.find((argument) => argument.includes("target=/run/secrets/motrix-operator-token"));
+      const source = tokenMount?.match(/(?:^|,)source=([^,]+),target=\/run\/secrets\/motrix-operator-token(?:,|$)/)?.[1];
+      if (!source) {
+        process.exitCode = 2;
+        break;
+      }
+      chmodSync(source, 0o600);
+      writeFileSync(motrixTokenPreparedMarker, "1000:1000:600");
+    } else if (args.includes("--detach") && args.includes("1000:1000") && args.includes("dist/server/index.mjs") && !existsSync(motrixTokenPreparedMarker)) {
+      process.stderr.write("Motrix bootstrap could not read the operator token file.\n");
+      process.exitCode = 64;
+    } else if (args.includes("copyto")) {
+      const failures = `${process.env.FAKE_DOCKER_LOG}.rclone-failures`;
+      const remaining = existsSync(failures) ? Number(readFileSync(failures, "utf8")) : 0;
+      if (remaining > 0) {
+        writeFileSync(failures, String(remaining - 1));
+        const errorFile = `${process.env.FAKE_DOCKER_LOG}.rclone-error`;
+        const exitCodeFile = `${process.env.FAKE_DOCKER_LOG}.rclone-exit-code`;
+        if (existsSync(errorFile)) process.stderr.write(readFileSync(errorFile, "utf8"));
+        process.exitCode = existsSync(exitCodeFile)
+          ? Number(readFileSync(exitCodeFile, "utf8"))
+          : 1;
+        break;
+      }
+    }
+    if (args.includes("listremotes")) {
+      const configMount = args.find((argument) => argument.includes("target=/config/rclone"));
+      const source = configMount?.match(/(?:^|,)source=([^,]+),target=\/config\/rclone(?:,|$)/)?.[1];
+      if (!source) {
+        process.exitCode = 2;
+        break;
+      }
+      const config = readFileSync(join(source, "rclone.conf"), "utf8");
+      for (const match of config.matchAll(/^\[([^\]\r\n]+)\]\s*$/gm)) {
+        process.stdout.write(`${match[1]}:\n`);
+      }
+    } else if (args.includes("--interactive")) {
+      process.stdin.resume();
+      process.stdin.once("end", () => process.stdout.write("fake-container-id\n"));
+    } else {
+      process.stdout.write("fake-container-id\n");
+    }
+    break;
+  case "wait": {
+    const interval = setInterval(() => {
+      if (existsSync(stoppedMarker)) {
+        clearInterval(interval);
+        process.stdout.write("0\n");
+      }
+    }, 10);
+    break;
+  }
+  case "inspect":
+    process.stdout.write("true\n");
+    break;
+  default:
+    process.stderr.write("unexpected fake Docker command\n");
+    process.exitCode = 2;
+}

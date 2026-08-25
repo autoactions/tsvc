@@ -6,16 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-const databaseScript = new URL("../scripts/stage-openlist-database.mjs", import.meta.url).pathname;
-const caScript = new URL("../scripts/stage-openlist-database-ca.mjs", import.meta.url).pathname;
+const databaseScript = new URL("../scripts/stage-database.mjs", import.meta.url).pathname;
+const caScript = new URL("../scripts/stage-database-ca.mjs", import.meta.url).pathname;
 
 function certificate() {
-  const root = mkdtempSync(join(tmpdir(), "openlist-ca-source-"));
+  const root = mkdtempSync(join(tmpdir(), "database-ca-source-"));
   const key = join(root, "key.pem");
   const cert = join(root, "ca.pem");
   const result = spawnSync("openssl", [
     "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-    "-subj", "/CN=OpenList Test CA", "-keyout", key, "-out", cert,
+    "-subj", "/CN=Database Test CA", "-keyout", key, "-out", cert,
   ]);
   assert.equal(result.status, 0, result.stderr.toString());
   const value = readFileSync(cert, "utf8");
@@ -25,7 +25,7 @@ function certificate() {
 }
 
 test("SC-04 stages canonical database JSON and a CA bundle as mode-0600 files", () => {
-  const root = mkdtempSync(join(tmpdir(), "openlist-staging-"));
+  const root = mkdtempSync(join(tmpdir(), "database-staging-"));
   const databasePath = join(root, "database.json");
   const caPath = join(root, "database-ca.pem");
   const database = {
@@ -35,10 +35,10 @@ test("SC-04 stages canonical database JSON and a CA bundle as mode-0600 files", 
   const ca = certificate();
   try {
     const databaseResult = spawnSync(process.execPath, [databaseScript, databasePath], {
-      env: { ...process.env, OPENLIST_DATABASE: JSON.stringify(database) },
+      env: { ...process.env, DATABASE: JSON.stringify(database) },
     });
     const caResult = spawnSync(process.execPath, [caScript, caPath], {
-      env: { ...process.env, OPENLIST_DATABASE_CA: ca },
+      env: { ...process.env, DATABASE_CA: ca },
     });
     assert.equal(databaseResult.status, 0, databaseResult.stderr.toString());
     assert.equal(caResult.status, 0, caResult.stderr.toString());
@@ -55,11 +55,11 @@ test("SC-04 rejects invalid or existing targets without disclosing Secret values
   const secret = "database-password-not-for-output";
   /** @type {[string, string, string][]} */
   const cases = [
-    [databaseScript, "OPENLIST_DATABASE", JSON.stringify({ host: "bad_host", port: 3306, user: "u", password: secret, name: "db" })],
-    [caScript, "OPENLIST_DATABASE_CA", `not-a-certificate-${secret}`],
+    [databaseScript, "DATABASE", JSON.stringify({ host: "bad_host", port: 3306, user: "u", password: secret, name: "db" })],
+    [caScript, "DATABASE_CA", `not-a-certificate-${secret}`],
   ];
   for (const [script, envName, value] of cases) {
-    const root = mkdtempSync(join(tmpdir(), "openlist-staging-invalid-"));
+    const root = mkdtempSync(join(tmpdir(), "database-staging-invalid-"));
     const destination = join(root, "secret");
     writeFileSync(destination, "existing", { mode: 0o600 });
     try {
@@ -72,5 +72,30 @@ test("SC-04 rejects invalid or existing targets without disclosing Secret values
     } finally {
       rmSync(root, { recursive: true });
     }
+  }
+});
+
+test("SC-04 does not accept legacy OpenList environment variables", () => {
+  const root = mkdtempSync(join(tmpdir(), "database-staging-legacy-"));
+  const databasePath = join(root, "database.json");
+  const caPath = join(root, "database-ca.pem");
+  const database = JSON.stringify({
+    host: "mysql.internal.example", port: 3306, user: "openlist",
+    password: "database-secret", name: "openlist",
+  });
+  const ca = certificate();
+  try {
+    const databaseResult = spawnSync(process.execPath, [databaseScript, databasePath], {
+      env: { ...process.env, DATABASE: "", OPENLIST_DATABASE: database },
+    });
+    const caResult = spawnSync(process.execPath, [caScript, caPath], {
+      env: { ...process.env, DATABASE_CA: "", OPENLIST_DATABASE_CA: ca },
+    });
+    assert.equal(databaseResult.status, 2);
+    assert.equal(caResult.status, 2);
+    assert.throws(() => statSync(databasePath), { code: "ENOENT" });
+    assert.throws(() => statSync(caPath), { code: "ENOENT" });
+  } finally {
+    rmSync(root, { recursive: true });
   }
 });

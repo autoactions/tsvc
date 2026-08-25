@@ -5,8 +5,8 @@ import { closeSync, openSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
 const destination = process.argv[2];
-const source = process.env.OPENLIST_DATABASE_CA ?? "";
-delete process.env.OPENLIST_DATABASE_CA;
+const source = process.env.DATABASE_CA ?? "";
+delete process.env.DATABASE_CA;
 
 /** @param {string} value */
 function validCertificateBundle(value) {
@@ -21,7 +21,7 @@ function validCertificateBundle(value) {
 }
 
 if (!destination || !isAbsolute(destination) || !validCertificateBundle(source)) {
-  console.error("OpenList database CA staging rejected invalid input.");
+  console.error("Database CA staging rejected invalid input.");
   process.exitCode = 2;
 } else {
   process.umask(0o077);
@@ -30,7 +30,7 @@ if (!destination || !isAbsolute(destination) || !validCertificateBundle(source))
     descriptor = openSync(destination, "wx", 0o600);
     writeFileSync(descriptor, `${source.trim()}\n`, { encoding: "utf8" });
   } catch {
-    console.error("OpenList database CA staging failed.");
+    console.error("Database CA staging failed.");
     process.exitCode = 1;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);

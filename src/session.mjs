@@ -33,8 +33,8 @@ const ARGUMENT_NAMES = new Set([
   "started-epoch-file",
   "rclone-config-file",
   "rclone-destinations-file",
-  "openlist-database-file",
-  "openlist-database-ca-file",
+  "database-file",
+  "database-ca-file",
 ]);
 
 /** @typedef {"chrome" | "motrix" | "openlist"} Service */
@@ -45,7 +45,7 @@ const ARGUMENT_NAMES = new Set([
  *   cloudflared: string,
  *   startedEpochFile: string,
  *   upload?: { rcloneConfigFile: string, destinationsFile: string },
- *   openlist?: { databaseFile: string, databaseCaFile: string },
+ *   database?: { file: string, caFile: string },
  * }} SessionOptions
  */
 
@@ -103,8 +103,8 @@ function parseArguments(argv) {
   const startedEpochFile = values["started-epoch-file"];
   const rcloneConfigFile = values["rclone-config-file"];
   const rcloneDestinationsFile = values["rclone-destinations-file"];
-  const openlistDatabaseFile = values["openlist-database-file"];
-  const openlistDatabaseCaFile = values["openlist-database-ca-file"];
+  const databaseFile = values["database-file"];
+  const databaseCaFile = values["database-ca-file"];
   if (
     (service !== "chrome" && service !== "motrix" && service !== "openlist") ||
     !credentialFile || !cloudflared || !startedEpochFile ||
@@ -121,23 +121,23 @@ function parseArguments(argv) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
   if (
-    (service === "openlist" && (!openlistDatabaseFile || !openlistDatabaseCaFile)) ||
-    (service !== "openlist" && (openlistDatabaseFile || openlistDatabaseCaFile)) ||
-    (openlistDatabaseFile && !isAbsolute(openlistDatabaseFile)) ||
-    (openlistDatabaseCaFile && !isAbsolute(openlistDatabaseCaFile))
+    (service === "openlist" && (!databaseFile || !databaseCaFile)) ||
+    (service !== "openlist" && (databaseFile || databaseCaFile)) ||
+    (databaseFile && !isAbsolute(databaseFile)) ||
+    (databaseCaFile && !isAbsolute(databaseCaFile))
   ) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
   const upload = rcloneConfigFile && rcloneDestinationsFile
     ? { rcloneConfigFile, destinationsFile: rcloneDestinationsFile }
     : undefined;
-  const openlist = openlistDatabaseFile && openlistDatabaseCaFile
-    ? { databaseFile: openlistDatabaseFile, databaseCaFile: openlistDatabaseCaFile }
+  const database = databaseFile && databaseCaFile
+    ? { file: databaseFile, caFile: databaseCaFile }
     : undefined;
   return {
     service, credentialFile, cloudflared, startedEpochFile,
     ...(upload ? { upload } : {}),
-    ...(openlist ? { openlist } : {}),
+    ...(database ? { database } : {}),
   };
 }
 
@@ -149,7 +149,7 @@ function validateRunnerTemporaryPaths(options) {
   }
   const paths = [options.credentialFile, options.cloudflared, options.startedEpochFile];
   if (options.upload) paths.push(options.upload.rcloneConfigFile, options.upload.destinationsFile);
-  if (options.openlist) paths.push(options.openlist.databaseFile, options.openlist.databaseCaFile);
+  if (options.database) paths.push(options.database.file, options.database.caFile);
   for (const path of paths) {
     const resolved = resolve(path);
     const metadata = lstatSync(resolved);
@@ -163,10 +163,10 @@ function validateRunnerTemporaryPaths(options) {
       throw new FixedSessionError("startup", "Rclone configuration file is invalid.");
     }
     if (
-      options.openlist && (path === options.openlist.databaseFile || path === options.openlist.databaseCaFile) &&
+      options.database && (path === options.database.file || path === options.database.caFile) &&
       (!metadata.isFile() || (metadata.mode & 0o077) !== 0)
     ) {
-      throw new FixedSessionError("startup", "OpenList database configuration file is invalid.");
+      throw new FixedSessionError("startup", "Database configuration file is invalid.");
     }
   }
 }
@@ -225,7 +225,7 @@ async function runSession(options, shutdown) {
       credentialFile: options.credentialFile,
       cancellation: serviceCancellation,
       ...(upload ? { upload } : {}),
-      ...(options.openlist ? { openlist: options.openlist } : {}),
+      ...(options.database ? { database: options.database } : {}),
     });
     const [serviceReady] = await Promise.race([
       Promise.all([
@@ -273,13 +273,13 @@ async function runSession(options, shutdown) {
         }
       }
     }
-    if (options.openlist) {
-      for (const path of [options.openlist.databaseFile, options.openlist.databaseCaFile]) {
+    if (options.database) {
+      for (const path of [options.database.file, options.database.caFile]) {
         try {
           unlinkSync(path);
         } catch (error) {
           if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
-            console.error("OpenList database configuration cleanup was incomplete.");
+            console.error("Database configuration cleanup was incomplete.");
           }
         }
       }

@@ -83,19 +83,19 @@ jobs:
             }
           ' "$RCLONE_DESTINATIONS" "$RUNNER_TEMP/rclone-destinations.json"
 
-      - name: Validate OpenList database configuration
+      - name: Validate database configuration
         env:
           INPUT_SERVICE: ${{ inputs.service }}
-          OPENLIST_DATABASE_CONFIGURED: ${{ secrets.OPENLIST_DATABASE != '' }}
-          OPENLIST_DATABASE_CA_CONFIGURED: ${{ secrets.OPENLIST_DATABASE_CA != '' }}
+          DATABASE_CONFIGURED: ${{ secrets.DATABASE != '' }}
+          DATABASE_CA_CONFIGURED: ${{ secrets.DATABASE_CA != '' }}
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$INPUT_SERVICE" != "openlist" ]]; then
             exit 0
           fi
-          if [[ "$OPENLIST_DATABASE_CONFIGURED" != "true" || "$OPENLIST_DATABASE_CA_CONFIGURED" != "true" ]]; then
-            echo "Incomplete OpenList database configuration" >&2
+          if [[ "$DATABASE_CONFIGURED" != "true" || "$DATABASE_CA_CONFIGURED" != "true" ]]; then
+            echo "Incomplete database configuration" >&2
             exit 2
           fi
 
@@ -136,19 +136,19 @@ jobs:
             *) exit 2 ;;
           esac
 
-      - name: Stage OpenList database configuration
+      - name: Stage database configuration
         if: ${{ inputs.service == 'openlist' }}
         shell: bash
         env:
-          OPENLIST_DATABASE: ${{ secrets.OPENLIST_DATABASE }}
-        run: node scripts/stage-openlist-database.mjs "$RUNNER_TEMP/openlist-database.json"
+          DATABASE: ${{ secrets.DATABASE }}
+        run: node scripts/stage-database.mjs "$RUNNER_TEMP/database.json"
 
-      - name: Stage OpenList database CA
+      - name: Stage database CA
         if: ${{ inputs.service == 'openlist' }}
         shell: bash
         env:
-          OPENLIST_DATABASE_CA: ${{ secrets.OPENLIST_DATABASE_CA }}
-        run: node scripts/stage-openlist-database-ca.mjs "$RUNNER_TEMP/openlist-database-ca.pem"
+          DATABASE_CA: ${{ secrets.DATABASE_CA }}
+        run: node scripts/stage-database-ca.mjs "$RUNNER_TEMP/database-ca.pem"
 
       - name: Stage Session Credential
         if: ${{ inputs.service == 'chrome' || inputs.service == 'openlist' }}
@@ -179,7 +179,7 @@ jobs:
         run: |
           set -euo pipefail
           upload_args=()
-          openlist_args=()
+          database_args=()
           credential_file="$RUNNER_TEMP/session-credential"
           if [[ "$INPUT_SERVICE" == "motrix" ]]; then
             credential_file="$RUNNER_TEMP/motrix-operator-token"
@@ -189,9 +189,9 @@ jobs:
             )
           fi
           if [[ "$INPUT_SERVICE" == "openlist" ]]; then
-            openlist_args+=(
-              --openlist-database-file "$RUNNER_TEMP/openlist-database.json"
-              --openlist-database-ca-file "$RUNNER_TEMP/openlist-database-ca.pem"
+            database_args+=(
+              --database-file "$RUNNER_TEMP/database.json"
+              --database-ca-file "$RUNNER_TEMP/database-ca.pem"
             )
           fi
           node src/session.mjs \
@@ -200,7 +200,7 @@ jobs:
             --cloudflared "$RUNNER_TEMP/cloudflared" \
             --started-epoch-file "$RUNNER_TEMP/session-started-epoch" \
             "${upload_args[@]}" \
-            "${openlist_args[@]}"
+            "${database_args[@]}"
 
       - name: Record pre-readiness failure
         if: ${{ failure() && steps.session.outcome != 'success' }}
@@ -226,5 +226,5 @@ jobs:
             "$RUNNER_TEMP/session-started-epoch" \
             "$RUNNER_TEMP/session-credential" \
             "$RUNNER_TEMP/motrix-operator-token" \
-            "$RUNNER_TEMP/openlist-database.json" \
-            "$RUNNER_TEMP/openlist-database-ca.pem"
+            "$RUNNER_TEMP/database.json" \
+            "$RUNNER_TEMP/database-ca.pem"

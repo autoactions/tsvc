@@ -120,27 +120,27 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
   const bin = join(root, "bin");
   const credentialFile = join(root, "session-credential");
   const rcloneConfigFile = join(root, "rclone.conf");
-  const openlistDatabaseFile = join(root, "openlist-database.json");
-  const openlistDatabaseCaFile = join(root, "openlist-database-ca.pem");
+  const databaseFile = join(root, "database.json");
+  const databaseCaFile = join(root, "database-ca.pem");
   const dockerLog = join(root, "docker.log");
   const fixture = new URL("./fixtures/fake-docker", import.meta.url).pathname;
   writeFileSync(credentialFile, credential, { mode: 0o600 });
   if (service === "motrix") writeFileSync(rcloneConfigFile, rcloneConfig, { mode: 0o600 });
   if (service === "openlist") {
-    writeFileSync(openlistDatabaseFile, JSON.stringify({
+    writeFileSync(databaseFile, JSON.stringify({
       host: "mysql.internal.example",
       port: 3306,
       user: "openlist",
       password: "database_secret_value",
       name: "openlist",
     }), { mode: 0o600 });
-    const key = join(root, "openlist-database-ca-key.pem");
+    const key = join(root, "database-ca-key.pem");
     const generated = spawnSync("openssl", [
       "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-      "-subj", "/CN=OpenList Database CA", "-keyout", key, "-out", openlistDatabaseCaFile,
+      "-subj", "/CN=OpenList Database CA", "-keyout", key, "-out", databaseCaFile,
     ]);
     assert.equal(generated.status, 0, generated.stderr.toString());
-    chmodSync(openlistDatabaseCaFile, 0o600);
+    chmodSync(databaseCaFile, 0o600);
   }
   await import("node:fs/promises").then(({ mkdir }) => mkdir(bin));
   chmodSync(fixture, 0o755);
@@ -173,7 +173,7 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
         ? { upload: { rcloneConfigFile, destinations } }
         : {}),
       ...(service === "openlist"
-        ? { openlist: { databaseFile: openlistDatabaseFile, databaseCaFile: openlistDatabaseCaFile } }
+        ? { database: { file: databaseFile, caFile: databaseCaFile } }
         : {}),
     });
     const ready = await serviceRun.ready;
@@ -189,8 +189,8 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
     assert.throws(() => statSync(credentialFile), { code: "ENOENT" });
     if (service === "motrix") assert.throws(() => statSync(rcloneConfigFile), { code: "ENOENT" });
     if (service === "openlist") {
-      assert.throws(() => statSync(openlistDatabaseFile), { code: "ENOENT" });
-      assert.throws(() => statSync(openlistDatabaseCaFile), { code: "ENOENT" });
+      assert.throws(() => statSync(databaseFile), { code: "ENOENT" });
+      assert.throws(() => statSync(databaseCaFile), { code: "ENOENT" });
     }
 
     const commands = readFileSync(dockerLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));

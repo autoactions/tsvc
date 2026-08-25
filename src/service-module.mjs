@@ -20,7 +20,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 
 import { isSessionCredential } from "./session-credential.mjs";
 import { isMotrixOperatorToken } from "./motrix-operator-token.mjs";
-import { parseOpenListDatabase } from "./openlist-database.mjs";
+import { parseDatabase } from "./database.mjs";
 import { isRcloneDestination, MOTRIX_DOWNLOADS_ROOT } from "./upload-destinations.mjs";
 
 const ORIGIN_HOST = "127.0.0.1";
@@ -53,7 +53,7 @@ const RCLONE_IMAGE =
  *     rcloneConfigFile: string,
  *     destinations: { id: string, localRoot: string, destination: string }[],
  *   },
- *   openlist?: { databaseFile: string, databaseCaFile: string },
+ *   database?: { file: string, caFile: string },
  * }} RunSelectedServiceOptions
  */
 /** @typedef {{ ready: Promise<ServiceReady>, finished: Promise<ServiceResult> }} ServiceRun */
@@ -119,9 +119,9 @@ async function runLifecycle(options, ready, finished) {
   /** @type {string | undefined} */
   let ownedRcloneConfigFile;
   /** @type {string | undefined} */
-  let ownedOpenlistDatabaseFile;
+  let ownedDatabaseFile;
   /** @type {string | undefined} */
-  let ownedOpenlistDatabaseCaFile;
+  let ownedDatabaseCaFile;
   /** @type {RcloneUploader | undefined} */
   let uploader;
 
@@ -130,16 +130,16 @@ async function runLifecycle(options, ready, finished) {
     const locations = await validateTemporaryLocations(
       options.credentialFile,
       options.upload?.rcloneConfigFile,
-      options.openlist?.databaseFile,
-      options.openlist?.databaseCaFile,
+      options.database?.file,
+      options.database?.caFile,
     );
     ownedCredentialFile = locations.credentialFile;
     ownedRcloneConfigFile = locations.rcloneConfigFile;
-    ownedOpenlistDatabaseFile = locations.openlistDatabaseFile;
-    ownedOpenlistDatabaseCaFile = locations.openlistDatabaseCaFile;
+    ownedDatabaseFile = locations.databaseFile;
+    ownedDatabaseCaFile = locations.databaseCaFile;
     const credential = await readCredential(options.service, locations.credentialFile);
-    const openlist = options.openlist && locations.openlistDatabaseFile && locations.openlistDatabaseCaFile
-      ? await readOpenListConfiguration(locations.openlistDatabaseFile, locations.openlistDatabaseCaFile)
+    const database = options.database && locations.databaseFile && locations.databaseCaFile
+      ? await readDatabaseConfiguration(locations.databaseFile, locations.databaseCaFile)
       : undefined;
     resources = await createOwnedResources(
       options.service,
@@ -149,7 +149,7 @@ async function runLifecycle(options, ready, finished) {
       options.upload && locations.rcloneConfigFile
         ? { rcloneConfigFile: locations.rcloneConfigFile, destinations: options.upload.destinations }
         : undefined,
-      openlist,
+      database,
     );
     await runCommand("docker", ["pull", resources.image], 10 * 60_000, options.cancellation);
     if (options.service === "motrix") {
@@ -197,8 +197,8 @@ async function runLifecycle(options, ready, finished) {
     const cleanupFailed = await cleanup(resources, [
       ownedCredentialFile,
       ownedRcloneConfigFile,
-      ownedOpenlistDatabaseFile,
-      ownedOpenlistDatabaseCaFile,
+      ownedDatabaseFile,
+      ownedDatabaseCaFile,
     ]);
     if (cleanupFailed && !failure) {
       failure = { phase: "cleanup", summary: "Service cleanup incomplete." };
@@ -226,9 +226,9 @@ function validateOptions(options) {
     throw new FixedServiceError("startup", "Selected Service upload configuration is invalid.");
   }
   if (
-    (options.service === "openlist" && !options.openlist) ||
-    (options.service !== "openlist" && options.openlist) ||
-    (options.openlist && (!isAbsolute(options.openlist.databaseFile) || !isAbsolute(options.openlist.databaseCaFile)))
+    (options.service === "openlist" && !options.database) ||
+    (options.service !== "openlist" && options.database) ||
+    (options.database && (!isAbsolute(options.database.file) || !isAbsolute(options.database.caFile)))
   ) {
     throw new FixedServiceError("startup", "Selected Service database configuration is invalid.");
   }
@@ -288,9 +288,9 @@ class OwnedResources {
    * @param {string} credentialFile
    * @param {string} tempRoot
    * @param {{ rcloneConfigFile: string, destinations: { id: string, localRoot: string, destination: string }[] } | undefined} upload
-   * @param {{ database: { host: string, port: number, user: string, password: string, name: string }, databaseCaFile: string } | undefined} openlist
+   * @param {{ connection: { host: string, port: number, user: string, password: string, name: string }, caFile: string } | undefined} database
    */
-  constructor(service, credentialFile, tempRoot, upload, openlist) {
+  constructor(service, credentialFile, tempRoot, upload, database) {
     this.service = service;
     this.credentialFile = credentialFile;
     this.tempRoot = tempRoot;
@@ -308,13 +308,13 @@ class OwnedResources {
           privateConfigFile: join(tempRoot, "rclone-config", "rclone.conf"),
         }
       : undefined;
-    this.openlist = openlist
+    this.database = database
       ? {
-          ...openlist,
-          generatedConfigFile: join(tempRoot, "openlist-config.json"),
-          privateCaFile: join(tempRoot, "openlist-database-ca.pem"),
+          ...database,
+          privateCaFile: join(tempRoot, "database-ca.pem"),
         }
       : undefined;
+    this.openlistConfigFile = service === "openlist" ? join(tempRoot, "openlist-config.json") : undefined;
     this.volumes = service === "chrome"
       ? [`temporary-session-chrome-config-${this.suffix}`]
       : service === "motrix" ? [
@@ -349,20 +349,21 @@ async function prepareMotrixOperatorToken(resources, cancellation) {
 
 /** @param {OwnedResources} resources @param {string} sessionAddress @param {AbortSignal} cancellation */
 async function prepareOpenList(resources, sessionAddress, cancellation) {
-  const openlist = resources.openlist;
+  const database = resources.database;
+  const generatedConfigFile = resources.openlistConfigFile;
   const [stateVolume] = resources.volumes;
-  if (!openlist || !stateVolume) throw new Error("missing OpenList configuration");
+  if (!database || !generatedConfigFile || !stateVolume) throw new Error("missing OpenList configuration");
   const config = {
     force: true,
     site_url: sessionAddress,
     jwt_secret: randomBytes(32).toString("hex"),
     database: {
       type: "mysql",
-      host: openlist.database.host,
-      port: openlist.database.port,
-      user: openlist.database.user,
-      password: openlist.database.password,
-      name: openlist.database.name,
+      host: database.connection.host,
+      port: database.connection.port,
+      user: database.connection.user,
+      password: database.connection.password,
+      name: database.connection.name,
       db_file: "",
       table_prefix: "x_",
       ssl_mode: "true",
@@ -378,7 +379,7 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
     bleve_dir: "/tmp/openlist-bleve",
     log: { enable: false },
   };
-  await writeFile(openlist.generatedConfigFile, JSON.stringify(config), { mode: 0o600 });
+  await writeFile(generatedConfigFile, JSON.stringify(config), { mode: 0o600 });
 
   await runCommand("docker", [
     "run", "--rm",
@@ -391,8 +392,8 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
     "--security-opt", "no-new-privileges",
     "--mount", `type=volume,source=${stateVolume},target=/state`,
     "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/session-credential`,
-    "--mount", `type=bind,source=${openlist.generatedConfigFile},target=/run/secrets/openlist-config`,
-    "--mount", `type=bind,source=${openlist.privateCaFile},target=/run/secrets/openlist-database-ca`,
+    "--mount", `type=bind,source=${generatedConfigFile},target=/run/secrets/openlist-config`,
+    "--mount", `type=bind,source=${database.privateCaFile},target=/run/secrets/openlist-database-ca`,
     "--entrypoint", "/bin/sh",
     resources.image,
     "-c",
@@ -415,8 +416,8 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
     "--mount", `type=volume,source=${stateVolume},target=/state`,
-    "--mount", `type=bind,source=${openlist.generatedConfigFile},target=/run/secrets/openlist-config,readonly`,
-    "--mount", `type=bind,source=${openlist.privateCaFile},target=/run/secrets/openlist-database-ca,readonly`,
+    "--mount", `type=bind,source=${generatedConfigFile},target=/run/secrets/openlist-config,readonly`,
+    "--mount", `type=bind,source=${database.privateCaFile},target=/run/secrets/openlist-database-ca,readonly`,
     "--entrypoint", "/bin/sh",
     resources.image,
     "-c",
@@ -451,14 +452,14 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
 /**
  * @param {string} credentialFile
  * @param {string | undefined} rcloneConfigFile
- * @param {string | undefined} openlistDatabaseFile
- * @param {string | undefined} openlistDatabaseCaFile
+ * @param {string | undefined} databaseFile
+ * @param {string | undefined} databaseCaFile
  */
 async function validateTemporaryLocations(
   credentialFile,
   rcloneConfigFile,
-  openlistDatabaseFile,
-  openlistDatabaseCaFile,
+  databaseFile,
+  databaseCaFile,
 ) {
   const runnerTemp = resolve(process.env.RUNNER_TEMP || tmpdir());
   const runnerTempReal = await realpath(runnerTemp);
@@ -484,44 +485,44 @@ async function validateTemporaryLocations(
       throw new FixedServiceError("startup", "Rclone configuration file is outside runner-temporary storage.");
     }
   }
-  const openlistDatabaseReal = openlistDatabaseFile
-    ? await validateOpenListTemporaryFile(openlistDatabaseFile, runnerTempReal)
+  const databaseReal = databaseFile
+    ? await validateDatabaseTemporaryFile(databaseFile, runnerTempReal)
     : undefined;
-  const openlistDatabaseCaReal = openlistDatabaseCaFile
-    ? await validateOpenListTemporaryFile(openlistDatabaseCaFile, runnerTempReal)
+  const databaseCaReal = databaseCaFile
+    ? await validateDatabaseTemporaryFile(databaseCaFile, runnerTempReal)
     : undefined;
   return {
     credentialFile: credentialReal,
     rcloneConfigFile: rcloneConfigReal,
-    openlistDatabaseFile: openlistDatabaseReal,
-    openlistDatabaseCaFile: openlistDatabaseCaReal,
+    databaseFile: databaseReal,
+    databaseCaFile: databaseCaReal,
     runnerTemp: runnerTempReal,
   };
 }
 
 /** @param {string} path @param {string} runnerTemp */
-async function validateOpenListTemporaryFile(path, runnerTemp) {
+async function validateDatabaseTemporaryFile(path, runnerTemp) {
   const metadata = await lstat(path).catch(() => undefined);
   if (
     !metadata?.isFile() || metadata.isSymbolicLink() ||
     (metadata.mode & 0o077) !== 0 || metadata.size === 0
   ) {
-    throw new FixedServiceError("startup", "OpenList database configuration file is invalid.");
+    throw new FixedServiceError("startup", "Database configuration file is invalid.");
   }
   const real = await realpath(path);
   if (!within(real, runnerTemp)) {
-    throw new FixedServiceError("startup", "OpenList database configuration file is outside runner-temporary storage.");
+    throw new FixedServiceError("startup", "Database configuration file is outside runner-temporary storage.");
   }
   return real;
 }
 
 /** @param {string} databaseFile @param {string} databaseCaFile */
-async function readOpenListConfiguration(databaseFile, databaseCaFile) {
-  let database;
+async function readDatabaseConfiguration(databaseFile, databaseCaFile) {
+  let connection;
   try {
-    database = parseOpenListDatabase(await readFile(databaseFile, "utf8"));
+    connection = parseDatabase(await readFile(databaseFile, "utf8"));
   } catch {
-    throw new FixedServiceError("startup", "OpenList database configuration is invalid.");
+    throw new FixedServiceError("startup", "Database configuration is invalid.");
   }
   const ca = await readFile(databaseCaFile, "utf8");
   const certificates = ca.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
@@ -529,9 +530,9 @@ async function readOpenListConfiguration(databaseFile, databaseCaFile) {
     if (!certificates || certificates.join("\n").trim() !== ca.trim()) throw new Error();
     for (const certificate of certificates) new X509Certificate(certificate);
   } catch {
-    throw new FixedServiceError("startup", "OpenList database CA is invalid.");
+    throw new FixedServiceError("startup", "Database CA is invalid.");
   }
-  return { database, databaseCaFile };
+  return { connection, caFile: databaseCaFile };
 }
 
 /**
@@ -540,12 +541,12 @@ async function readOpenListConfiguration(databaseFile, databaseCaFile) {
  * @param {string} runnerTemp
  * @param {AbortSignal} cancellation
  * @param {{ rcloneConfigFile: string, destinations: { id: string, localRoot: string, destination: string }[] } | undefined} upload
- * @param {{ database: { host: string, port: number, user: string, password: string, name: string }, databaseCaFile: string } | undefined} openlist
+ * @param {{ connection: { host: string, port: number, user: string, password: string, name: string }, caFile: string } | undefined} database
  */
-async function createOwnedResources(service, credentialFile, runnerTemp, cancellation, upload, openlist) {
+async function createOwnedResources(service, credentialFile, runnerTemp, cancellation, upload, database) {
   const tempRoot = await mkdtemp(join(runnerTemp, "temporary-session-"));
   await chmod(tempRoot, 0o700);
-  const resources = new OwnedResources(service, credentialFile, tempRoot, upload, openlist);
+  const resources = new OwnedResources(service, credentialFile, tempRoot, upload, database);
   /** @type {string[]} */
   const createdVolumes = [];
   try {
@@ -554,9 +555,9 @@ async function createOwnedResources(service, credentialFile, runnerTemp, cancell
       await copyFile(resources.upload.rcloneConfigFile, resources.upload.privateConfigFile);
       await chmod(resources.upload.privateConfigFile, 0o600);
     }
-    if (resources.openlist) {
-      await copyFile(resources.openlist.databaseCaFile, resources.openlist.privateCaFile);
-      await chmod(resources.openlist.privateCaFile, 0o600);
+    if (resources.database) {
+      await copyFile(resources.database.caFile, resources.database.privateCaFile);
+      await chmod(resources.database.privateCaFile, 0o600);
     }
     for (const volume of resources.volumes) {
       await runCommand("docker", ["volume", "create", volume], 60_000, cancellation);
@@ -895,7 +896,7 @@ function motrixDockerArgs(resources, sessionAddress) {
 /** @param {OwnedResources} resources */
 function openlistDockerArgs(resources) {
   const [stateVolume] = resources.volumes;
-  if (!resources.openlist || !stateVolume) throw new Error("missing OpenList configuration");
+  if (!resources.database || !stateVolume) throw new Error("missing OpenList configuration");
   return [
     ...commonDockerArgs(resources),
     "--user", "1001:1001",

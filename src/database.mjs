@@ -1,9 +1,9 @@
 /**
- * @typedef {{ host: string, port: number, user: string, password: string, name: string }} OpenListDatabase
+ * @typedef {{ host: string, port: number, user: string, password: string, name: string }} Database
  */
 
-/** @param {unknown} value @returns {OpenListDatabase} */
-export function parseOpenListDatabaseValue(value) {
+/** @param {unknown} value @returns {Database} */
+export function parseDatabaseValue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid");
   const candidate = /** @type {Record<string, unknown>} */ (value);
   if (Object.keys(candidate).sort().join(",") !== "host,name,password,port,user") {
@@ -23,9 +23,9 @@ export function parseOpenListDatabaseValue(value) {
   return { host, port: /** @type {number} */ (port), user, password, name };
 }
 
-/** @param {string} source @returns {OpenListDatabase} */
-export function parseOpenListDatabase(source) {
-  return parseOpenListDatabaseValue(JSON.parse(source));
+/** @param {string} source @returns {Database} */
+export function parseDatabase(source) {
+  return parseDatabaseValue(JSON.parse(source));
 }
 
 /** @param {string} value */

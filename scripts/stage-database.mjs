@@ -3,21 +3,21 @@
 import { closeSync, openSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
-import { parseOpenListDatabase } from "../src/openlist-database.mjs";
+import { parseDatabase } from "../src/database.mjs";
 
 const destination = process.argv[2];
-const source = process.env.OPENLIST_DATABASE ?? "";
-delete process.env.OPENLIST_DATABASE;
+const source = process.env.DATABASE ?? "";
+delete process.env.DATABASE;
 
 let database;
 try {
-  database = parseOpenListDatabase(source);
+  database = parseDatabase(source);
 } catch {
   database = undefined;
 }
 
 if (!destination || !isAbsolute(destination) || !database) {
-  console.error("OpenList database configuration staging rejected invalid input.");
+  console.error("Database configuration staging rejected invalid input.");
   process.exitCode = 2;
 } else {
   process.umask(0o077);
@@ -26,7 +26,7 @@ if (!destination || !isAbsolute(destination) || !database) {
     descriptor = openSync(destination, "wx", 0o600);
     writeFileSync(descriptor, JSON.stringify(database), { encoding: "utf8" });
   } catch {
-    console.error("OpenList database configuration staging failed.");
+    console.error("Database configuration staging failed.");
     process.exitCode = 1;
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);

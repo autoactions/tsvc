@@ -54,7 +54,7 @@ test("WF-01 invalid raw dispatch values fail in the secret-free first step", () 
 test("WF-03 validates and stages a controlled destination manifest before checkout", () => {
   const workflow = readFileSync(workflowPath, "utf8");
   const match = workflow.match(
-    /- name: Validate Motrix upload configuration\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: Validate OpenList database configuration/,
+    /- name: Validate Motrix upload configuration\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: Validate database configuration/,
   );
   assert.ok(match?.[1], "rclone validation step must remain statically inspectable");
   const script = match[1]
@@ -107,17 +107,17 @@ test("WF-03 validates and stages a controlled destination manifest before checko
     );
   }
 
-  const validationEnd = workflow.indexOf("- name: Validate OpenList database configuration");
+  const validationEnd = workflow.indexOf("- name: Validate database configuration");
   const checkout = workflow.indexOf("- name: Check out repository implementation");
   assert.ok(validationEnd > 0 && checkout > validationEnd);
 });
 
-test("WF-04 requires both OpenList database Secrets before checkout", () => {
+test("WF-04 requires both database Secrets before checkout", () => {
   const workflow = readFileSync(workflowPath, "utf8");
   const match = workflow.match(
-    /- name: Validate OpenList database configuration\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: Record Session start/,
+    /- name: Validate database configuration\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: Record Session start/,
   );
-  assert.ok(match?.[1], "OpenList database validation must remain statically inspectable");
+  assert.ok(match?.[1], "database validation must remain statically inspectable");
   const script = match[1].split("\n").map((line) => line.slice(10)).join("\n");
   /** @param {string} service @param {string} database @param {string} ca */
   function validate(service, database, ca) {
@@ -125,8 +125,8 @@ test("WF-04 requires both OpenList database Secrets before checkout", () => {
       env: {
         ...process.env,
         INPUT_SERVICE: service,
-        OPENLIST_DATABASE_CONFIGURED: database,
-        OPENLIST_DATABASE_CA_CONFIGURED: ca,
+        DATABASE_CONFIGURED: database,
+        DATABASE_CA_CONFIGURED: ca,
       },
     });
   }
@@ -139,7 +139,7 @@ test("WF-04 requires both OpenList database Secrets before checkout", () => {
   for (const configured of incomplete) {
     assert.notEqual(validate("openlist", configured[0], configured[1]).status, 0);
   }
-  assert.ok(workflow.indexOf("- name: Validate OpenList database configuration") < workflow.indexOf("- name: Check out repository implementation"));
+  assert.ok(workflow.indexOf("- name: Validate database configuration") < workflow.indexOf("- name: Check out repository implementation"));
 });
 
 test("WF-01 workflow pins its immutable execution policy", () => {
@@ -174,12 +174,13 @@ test("WF-01 workflow pins its immutable execution policy", () => {
   assert.match(workflow, /RCLONE_DESTINATIONS: \$\{\{ vars\.RCLONE_DESTINATIONS \}\}/);
   assert.doesNotMatch(workflow, /vars\.RCLONE_DESTINATION(?:\s|\}|$)/);
   assert.match(workflow, /--rclone-destinations-file "\$RUNNER_TEMP\/rclone-destinations\.json"/);
-  assert.match(workflow, /OPENLIST_DATABASE_CONFIGURED: \$\{\{ secrets\.OPENLIST_DATABASE != '' \}\}/);
-  assert.match(workflow, /OPENLIST_DATABASE_CA_CONFIGURED: \$\{\{ secrets\.OPENLIST_DATABASE_CA != '' \}\}/);
-  assert.match(workflow, /OPENLIST_DATABASE: \$\{\{ secrets\.OPENLIST_DATABASE \}\}/);
-  assert.match(workflow, /OPENLIST_DATABASE_CA: \$\{\{ secrets\.OPENLIST_DATABASE_CA \}\}/);
-  assert.match(workflow, /--openlist-database-file "\$RUNNER_TEMP\/openlist-database\.json"/);
-  assert.match(workflow, /--openlist-database-ca-file "\$RUNNER_TEMP\/openlist-database-ca\.pem"/);
+  assert.match(workflow, /DATABASE_CONFIGURED: \$\{\{ secrets\.DATABASE != '' \}\}/);
+  assert.match(workflow, /DATABASE_CA_CONFIGURED: \$\{\{ secrets\.DATABASE_CA != '' \}\}/);
+  assert.match(workflow, /DATABASE: \$\{\{ secrets\.DATABASE \}\}/);
+  assert.match(workflow, /DATABASE_CA: \$\{\{ secrets\.DATABASE_CA \}\}/);
+  assert.match(workflow, /--database-file "\$RUNNER_TEMP\/database\.json"/);
+  assert.match(workflow, /--database-ca-file "\$RUNNER_TEMP\/database-ca\.pem"/);
+  assert.doesNotMatch(workflow, /OPENLIST_DATABASE|--openlist-database/);
   assert.match(
     workflow,
     /rclone\/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548/,
@@ -196,8 +197,8 @@ test("WF-01 workflow pins its immutable execution policy", () => {
   assert.match(workflow, /if: \$\{\{ always\(\) \}\}/);
   assert.match(workflow, /"\$RUNNER_TEMP\/rclone\.conf"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/rclone-destinations\.json"/);
-  assert.match(workflow, /"\$RUNNER_TEMP\/openlist-database\.json"/);
-  assert.match(workflow, /"\$RUNNER_TEMP\/openlist-database-ca\.pem"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/database\.json"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/database-ca\.pem"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/session-credential" \\\n\s+"\$RUNNER_TEMP\/motrix-operator-token"/);
 
   const uses = [...workflow.matchAll(/uses:\s+([^\s]+)/g)].map((entry) => entry[1]);

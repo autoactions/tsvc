@@ -412,7 +412,7 @@ test("WF-03 rejects a Motrix Session without its required upload configuration",
   }
 });
 
-test("WF-04 rejects an OpenList Session without both database files", () => {
+test("WF-04 rejects incomplete or legacy OpenList database arguments", () => {
   const root = mkdtempSync(join(tmpdir(), "session-orchestrator-openlist-arguments-"));
   const credentialFile = join(root, "session-credential");
   const started = join(root, "started");
@@ -433,8 +433,12 @@ test("WF-04 rejects an OpenList Session without both database files", () => {
   try {
     for (const extra of [
       [],
-      ["--openlist-database-file", join(root, "database.json")],
-      ["--openlist-database-ca-file", join(root, "database-ca.pem")],
+      ["--database-file", join(root, "database.json")],
+      ["--database-ca-file", join(root, "database-ca.pem")],
+      [
+        "--openlist-database-file", join(root, "database.json"),
+        "--openlist-database-ca-file", join(root, "database-ca.pem"),
+      ],
     ]) {
       const result = spawnSync(process.execPath, [...base, ...extra], {
         env: { ...process.env, GITHUB_STEP_SUMMARY: summary, RUNNER_TEMP: root },
@@ -442,6 +446,17 @@ test("WF-04 rejects an OpenList Session without both database files", () => {
       assert.equal(result.status, 1);
       assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
     }
+    const chromeArguments = [...base];
+    chromeArguments[2] = "chrome";
+    const unsupported = spawnSync(process.execPath, [
+      ...chromeArguments,
+      "--database-file", join(root, "database.json"),
+      "--database-ca-file", join(root, "database-ca.pem"),
+    ], {
+      env: { ...process.env, GITHUB_STEP_SUMMARY: summary, RUNNER_TEMP: root },
+    });
+    assert.equal(unsupported.status, 1);
+    assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
   } finally {
     rmSync(root, { recursive: true });
   }

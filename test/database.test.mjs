@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseOpenListDatabase } from "../src/openlist-database.mjs";
+import { parseDatabase } from "../src/database.mjs";
 
-test("SC-04 accepts only the closed OpenList database configuration", () => {
+test("SC-04 accepts only the closed database configuration", () => {
   const expected = {
     host: "mysql.internal.example",
     port: 3306,
@@ -11,7 +11,7 @@ test("SC-04 accepts only the closed OpenList database configuration", () => {
     password: "p@ss:w?rd#value",
     name: "openlist",
   };
-  assert.deepEqual(parseOpenListDatabase(JSON.stringify(expected)), expected);
+  assert.deepEqual(parseDatabase(JSON.stringify(expected)), expected);
 
   for (const value of [
     "",
@@ -27,5 +27,5 @@ test("SC-04 accepts only the closed OpenList database configuration", () => {
     JSON.stringify({ ...expected, password: "" }),
     JSON.stringify({ ...expected, password: "line\nvalue" }),
     JSON.stringify({ ...expected, name: "openlist-db" }),
-  ]) assert.throws(() => parseOpenListDatabase(value));
+  ]) assert.throws(() => parseDatabase(value));
 });

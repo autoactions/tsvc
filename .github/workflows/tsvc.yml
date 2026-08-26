@@ -256,7 +256,7 @@ jobs:
           retention-days: 1
 
       - name: Wait for Session
-        if: ${{ always() && steps.session.outcome == 'success' }}
+        if: ${{ steps.session.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail

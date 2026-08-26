@@ -8,10 +8,10 @@ const random = {
   iv: Buffer.from(Array.from({ length: 12 }, (_, index) => index + 17)),
 };
 
-test("Sensitive Fact v1 matches the cross-repository vector", () => {
+test("Sensitive Fact v2 matches the cross-repository vector", () => {
   assert.equal(
     encryptSensitiveFact("Session Password", "private-value", "shared-session-password", random),
-    "enc:v1:AQIDBAUGBwgJCgsMDQ4PEA:ERITFBUWFxgZGhsc:8XYgVKM3GYZMpY15qf4NG8huLDN3f-XD3WdOmQw",
+    "enc:v2:AQIDBAUGBwgJCgsMDQ4PEA:ERITFBUWFxgZGhsc:Shap0xyfNasoDIc5tPqGpuH_Muzis2PBzP3gu_A",
   );
 });
 

@@ -428,7 +428,7 @@ function readSensitiveFactsBlock(path) {
   const block = readFileSync(path, "utf8");
   if (
     Buffer.byteLength(block, "utf8") > 16_384 ||
-    !/^## Sensitive Facts\n\n(?:- [^:\r\n]{1,80}: enc:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+\n)+$/.test(block)
+    !/^## Sensitive Facts\n\n(?:- [^:\r\n]{1,80}: enc:v2:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+\n)+$/.test(block)
   ) {
     throw new FixedSessionError("startup", "Sensitive Facts file is invalid.");
   }

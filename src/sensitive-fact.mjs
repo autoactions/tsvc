@@ -1,6 +1,6 @@
 import { createCipheriv, pbkdf2Sync, randomBytes } from "node:crypto";
 
-const ITERATIONS = 600_000;
+const ITERATIONS = 100_000;
 const LABEL_PATTERN = /^[^:\r\n]{1,80}$/;
 
 /**
@@ -18,9 +18,9 @@ export function encryptSensitiveFact(label, value, password, random = {}) {
   if (salt.length !== 16 || iv.length !== 12) throw new Error("Sensitive Fact randomness is invalid.");
   const key = pbkdf2Sync(password, salt, ITERATIONS, 32, "sha256");
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(Buffer.from(`session-deck-sensitive-fact:v1:${label}`, "utf8"));
+  cipher.setAAD(Buffer.from(`session-deck-sensitive-fact:v2:${label}`, "utf8"));
   const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final(), cipher.getAuthTag()]);
-  return `enc:v1:${salt.toString("base64url")}:${iv.toString("base64url")}:${encrypted.toString("base64url")}`;
+  return `enc:v2:${salt.toString("base64url")}:${iv.toString("base64url")}:${encrypted.toString("base64url")}`;
 }
 
 /** @param {{ label: string, envelope: string }[]} facts */
@@ -30,7 +30,7 @@ export function sensitiveFactsBlock(facts) {
   for (const fact of facts) {
     if (
       !LABEL_PATTERN.test(fact.label) || labels.has(fact.label) || fact.envelope.length > 5_600 ||
-      !/^enc:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/.test(fact.envelope)
+      !/^enc:v2:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/.test(fact.envelope)
     ) {
       throw new Error("Sensitive Fact is invalid.");
     }

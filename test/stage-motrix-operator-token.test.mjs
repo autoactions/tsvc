@@ -18,14 +18,14 @@ function stage(tokenDestination, factsDestination, secret = password) {
 
 /** @param {string} block */
 function decryptToken(block) {
-  const match = block.match(/^- Motrix Operator Token: enc:v1:([^:]+):([^:]+):([^\s]+)$/m);
+  const match = block.match(/^- Motrix Operator Token: enc:v2:([^:]+):([^:]+):([^\s]+)$/m);
   assert.ok(match);
   const salt = Buffer.from(match[1] ?? "", "base64url");
   const iv = Buffer.from(match[2] ?? "", "base64url");
   const encrypted = Buffer.from(match[3] ?? "", "base64url");
-  const key = pbkdf2Sync(password, salt, 600_000, 32, "sha256");
+  const key = pbkdf2Sync(password, salt, 100_000, 32, "sha256");
   const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAAD(Buffer.from("session-deck-sensitive-fact:v1:Motrix Operator Token"));
+  decipher.setAAD(Buffer.from("session-deck-sensitive-fact:v2:Motrix Operator Token"));
   decipher.setAuthTag(encrypted.subarray(-16));
   return Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString("utf8");
 }

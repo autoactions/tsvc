@@ -26,7 +26,7 @@ function serviceOrigin(service) {
   return `http://127.0.0.1:${service === "chrome" ? 58080 : service === "motrix" ? 58081 : 58082}`;
 }
 
-/** @param {Service} service @param {{ healthy: boolean, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
+/** @param {Service} service @param {{ healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
 function startServiceServer(service, health) {
   const basic = `Basic ${Buffer.from(`session:${credential}`).toString("base64")}`;
   const bearer = `Bearer ${credential}`;
@@ -40,7 +40,7 @@ function startServiceServer(service, health) {
       return;
     }
     if (service === "openlist" && request.url === "/") {
-      response.writeHead(200).end("openlist");
+      response.writeHead(health.publicHealthy ? 200 : 503).end("openlist");
       return;
     }
     if (service === "openlist" && request.method === "POST" && request.url === "/api/auth/login") {
@@ -49,7 +49,10 @@ function startServiceServer(service, health) {
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         const payload = JSON.parse(body);
-        if (payload.username === "admin" && payload.password === credential) {
+        if (
+          health.localLoginHealthy && payload.username === "admin" &&
+          payload.password === readFileSync(health.openlistAdminState, "utf8")
+        ) {
           response.writeHead(200, { "content-type": "application/json" })
             .end('{"code":200,"data":{"token":"test-token"}}');
         } else response.writeHead(401).end('{"code":401}');
@@ -113,9 +116,10 @@ function startServiceServer(service, health) {
 /**
  * @param {Service} service
  * @param {"cancel" | "exit" | "unhealthy"} [termination]
- * @param {(context: { health: { healthy: boolean, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }, dockerLog: string, output: string[] }) => Promise<void>} [onReady]
+ * @param {(context: { health: { healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }, dockerLog: string, output: string[] }) => Promise<void>} [onReady]
+ * @param {{ initialOpenListPassword?: string, startupFailure?: "bootstrap" | "local-login" | "public" }} [scenario]
  */
-async function exerciseAdapter(service, termination = "cancel", onReady) {
+async function exerciseAdapter(service, termination = "cancel", onReady, scenario = {}) {
   const root = mkdtempSync(join(tmpdir(), `service-module-${service}-`));
   const bin = join(root, "bin");
   const credentialFile = join(root, "session-credential");
@@ -123,6 +127,7 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
   const databaseFile = join(root, "database.json");
   const databaseCaFile = join(root, "database-ca.pem");
   const dockerLog = join(root, "docker.log");
+  const openlistAdminState = `${dockerLog}.openlist-admin`;
   const fixture = new URL("./fixtures/fake-docker", import.meta.url).pathname;
   writeFileSync(credentialFile, credential, { mode: 0o600 });
   if (service === "motrix") writeFileSync(rcloneConfigFile, rcloneConfig, { mode: 0o600 });
@@ -140,6 +145,12 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
     ]);
     assert.equal(generated.status, 0, generated.stderr.toString());
     chmodSync(databaseCaFile, 0o600);
+    if (scenario.initialOpenListPassword !== undefined) {
+      writeFileSync(openlistAdminState, scenario.initialOpenListPassword, { mode: 0o600 });
+    }
+    if (scenario.startupFailure === "bootstrap") {
+      writeFileSync(`${dockerLog}.openlist-bootstrap-failure`, "injected");
+    }
   }
   await import("node:fs/promises").then(({ mkdir }) => mkdir(bin));
   chmodSync(fixture, 0o755);
@@ -153,7 +164,15 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
   process.env.FAKE_DOCKER_LOG = dockerLog;
   process.env.PATH = `${bin}:${previous.path}`;
   process.env.RUNNER_TEMP = root;
-  const health = { healthy: true, tasks: [], commands: [], cleanupFailures: 0 };
+  const health = {
+    healthy: true,
+    localLoginHealthy: scenario.startupFailure !== "local-login",
+    publicHealthy: scenario.startupFailure !== "public",
+    openlistAdminState,
+    tasks: [],
+    commands: [],
+    cleanupFailures: 0,
+  };
   const server = await startServiceServer(service, health);
   const cancellation = new AbortController();
   /** @type {string[]} */
@@ -175,6 +194,20 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
         ? { database: { file: databaseFile, caFile: databaseCaFile } }
         : {}),
     });
+    if (scenario.startupFailure) {
+      if (scenario.startupFailure === "bootstrap") {
+        // The injected bootstrap command settles on its own.
+      } else if (scenario.startupFailure === "public") {
+        await waitUntil(() => output.includes("Startup stage complete: Local OpenList admin login."));
+      } else {
+        await waitUntil(() => output.includes("Startup stage complete: Service container."));
+      }
+      if (scenario.startupFailure !== "bootstrap") cancellation.abort();
+      const failure = await serviceRun.ready.catch((error) => error);
+      const result = await serviceRun.finished;
+      const commands = readFileSync(dockerLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+      return { commands, motrixCommands: health.commands, output, result, root, startupFailure: failure };
+    }
     const ready = await serviceRun.ready;
     assert.match(
       ready.accessGuidance,
@@ -236,7 +269,7 @@ test("AU-01 and IS-01 Chrome uses native file-backed authentication and one conf
 });
 
 test("AU-03, IS-01, and PS-01 OpenList bootstraps a persistent database behind one confined Origin", async () => {
-  const { commands, result, root } = await exerciseAdapter("openlist", "cancel", async ({ dockerLog }) => {
+  const { commands, output, result, root } = await exerciseAdapter("openlist", "cancel", async ({ dockerLog }) => {
     const activeCommands = readFileSync(dockerLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     const permission = activeCommands.find((command) =>
       command.some((/** @type {string} */ argument) => argument.endsWith("-openlist-permissions"))
@@ -265,6 +298,9 @@ test("AU-03, IS-01, and PS-01 OpenList bootstraps a persistent database behind o
   assert.ok(bootstrap.includes("1001:1001"));
   assert.ok(bootstrap.includes("SSL_CERT_FILE=/opt/openlist/data/database-ca.pem"));
   assert.ok(bootstrap.some((/** @type {string} */ argument) => argument.includes("OPENLIST_ADMIN_PASSWORD") && argument.includes("session-credential")));
+  const bootstrapScript = bootstrap[bootstrap.indexOf("-c") + 1];
+  assert.match(bootstrapScript, /\.\/openlist admin set/);
+  assert.match(bootstrapScript, />\/dev\/null 2>&1/);
   assert.ok(run.includes(openlistImage));
   assert.ok(run.includes("127.0.0.1:58082:5244"));
   assert.ok(run.includes("1001:1001"));
@@ -277,6 +313,63 @@ test("AU-03, IS-01, and PS-01 OpenList bootstraps a persistent database behind o
   assert.doesNotMatch(JSON.stringify(run), /5245|session-credential|OPENLIST_ADMIN_PASSWORD/);
   assert.doesNotMatch(JSON.stringify(commands), new RegExp(`${credential}|database_secret_value`));
   assert.deepEqual(result, { status: "success" });
+  assert.equal(readFileSync(join(root, "docker.log.openlist-admin"), "utf8"), credential);
+  assert.doesNotMatch(output.join("\n"), new RegExp(credential));
+  assert.deepEqual(output.filter((line) => line.startsWith("Startup stage complete:")), [
+    "Startup stage complete: Service image.",
+    "Startup stage complete: OpenList database bootstrap.",
+    "Startup stage complete: Service container.",
+    "Startup stage complete: Local OpenList admin login.",
+    "Startup stage complete: Public access.",
+  ]);
+  assert.doesNotMatch(output.filter((line) => line.startsWith("Startup stage complete:")).join("\n"), /https?:|127\.0\.0\.1|mysql|password|secret/i);
+  rmSync(root, { recursive: true });
+});
+
+test("AU-03 OpenList reapplies the Session Credential to an existing admin", async () => {
+  const oldCredential = "old-persisted-admin-password";
+  const { commands, output, result, root } = await exerciseAdapter(
+    "openlist",
+    "cancel",
+    undefined,
+    { initialOpenListPassword: oldCredential },
+  );
+  assert.equal(readFileSync(join(root, "docker.log.openlist-admin"), "utf8"), credential);
+  assert.deepEqual(result, { status: "success" });
+  const observable = `${JSON.stringify(commands)}${output.join("\n")}`;
+  assert.doesNotMatch(observable, new RegExp(credential));
+  assert.doesNotMatch(observable, new RegExp(oldCredential));
+  rmSync(root, { recursive: true });
+});
+
+test("FL-01 OpenList reports a local admin login that never becomes ready", async () => {
+  const { commands, output, result, root, startupFailure } = await exerciseAdapter(
+    "openlist", "cancel", undefined, { startupFailure: "local-login" },
+  );
+  assert.deepEqual(startupFailure, { phase: "startup", summary: "Local OpenList login was not ready." });
+  assert.deepEqual(result, startupFailure);
+  assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}`, new RegExp(credential));
+  rmSync(root, { recursive: true });
+});
+
+test("FL-01 OpenList reports a database bootstrap failure without sensitive output", async () => {
+  const { commands, output, result, root, startupFailure } = await exerciseAdapter(
+    "openlist", "cancel", undefined, { startupFailure: "bootstrap" },
+  );
+  assert.deepEqual(startupFailure, { phase: "startup", summary: "OpenList database bootstrap failed." });
+  assert.deepEqual(result, startupFailure);
+  assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}${JSON.stringify(result)}`, new RegExp(credential));
+  assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}${JSON.stringify(result)}`, /database_secret_value/);
+  rmSync(root, { recursive: true });
+});
+
+test("FL-01 OpenList reports public access that never becomes ready", async () => {
+  const { commands, output, result, root, startupFailure } = await exerciseAdapter(
+    "openlist", "cancel", undefined, { startupFailure: "public" },
+  );
+  assert.deepEqual(startupFailure, { phase: "startup", summary: "Public access was not ready." });
+  assert.deepEqual(result, startupFailure);
+  assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}`, new RegExp(credential));
   rmSync(root, { recursive: true });
 });
 

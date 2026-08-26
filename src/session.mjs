@@ -24,7 +24,9 @@ const SERVICE_ORIGINS = {
   openlist: "http://127.0.0.1:58082",
 };
 const METRICS_ORIGIN = "http://127.0.0.1:49312";
-const STARTUP_TIMEOUT_MS = 5 * 60_000;
+const STARTUP_TIMEOUT_MS = process.env.NODE_TEST_CONTEXT && process.env.TSVC_TEST_STARTUP_TIMEOUT_MS
+  ? Number(process.env.TSVC_TEST_STARTUP_TIMEOUT_MS)
+  : 5 * 60_000;
 const LOG_SIZE = 10 * 1024 * 1024;
 const LOG_FILES = 3;
 const ARGUMENT_NAMES = new Set([
@@ -229,8 +231,8 @@ async function runSession(options, shutdown) {
     const sessionAddress = await Promise.race([
       obtainSessionAddress(cloudflared, serviceCancellation),
       exitAsFailure(cloudflaredExit, "cloudflared exited during startup."),
-      abortedAsFailure(serviceCancellation, "Session startup did not complete within five minutes."),
     ]);
+    console.log("Startup stage complete: Quick Tunnel address.");
     serviceRun = runSelectedService({
       service: options.service,
       sessionAddress,
@@ -239,14 +241,20 @@ async function runSession(options, shutdown) {
       ...(upload ? { upload } : {}),
       ...(options.database ? { database: options.database } : {}),
     });
-    const [serviceReady] = await Promise.race([
-      Promise.all([
-        serviceRun.ready,
-        waitForTunnelReady(cloudflared, serviceCancellation),
-      ]),
-      exitAsFailure(cloudflaredExit, "cloudflared exited during startup."),
-      abortedAsFailure(serviceCancellation, "Session startup did not complete within five minutes."),
-    ]);
+    const serviceReadyPromise = serviceRun.ready;
+    const tunnelReadyPromise = waitForTunnelReady(cloudflared, serviceCancellation);
+    let serviceReady;
+    try {
+      [serviceReady] = await Promise.race([
+        Promise.all([serviceReadyPromise, tunnelReadyPromise]),
+        exitAsFailure(cloudflaredExit, "cloudflared exited during startup."),
+      ]);
+    } catch (error) {
+      if (startupDeadline.signal.aborted) {
+        await serviceReadyPromise.catch((serviceError) => { throw serviceError; });
+      }
+      throw error;
+    }
     clearTimeout(startupTimer);
     ready = true;
     writeReadySummary(options, sessionAddress, serviceReady.accessGuidance);
@@ -340,7 +348,7 @@ async function obtainSessionAddress(processHandle, signal) {
       await delay(250, signal);
     }
   }
-  throw new FixedSessionError("startup", "Session startup was cancelled.");
+  throw new FixedSessionError("startup", "Quick Tunnel address was not ready.");
 }
 
 /** @param {unknown} candidate */
@@ -371,7 +379,7 @@ async function waitForTunnelReady(processHandle, signal) {
       await delay(250, signal);
     }
   }
-  throw new FixedSessionError("startup", "Session startup was cancelled.");
+  throw new FixedSessionError("startup", "Quick Tunnel was not ready.");
 }
 
 /** @param {import("node:child_process").ChildProcess} processHandle @param {AbortSignal} signal */
@@ -456,12 +464,6 @@ function locatorBlock(address) {
 async function exitAsFailure(exit, summary) {
   await exit;
   throw new FixedSessionError("runtime", summary);
-}
-
-/** @param {AbortSignal} signal @param {string} summary @returns {Promise<never>} */
-async function abortedAsFailure(signal, summary) {
-  await waitForAbort(signal);
-  throw new FixedSessionError("startup", summary);
 }
 
 /** @param {Promise<import("./service-module.mjs").ServiceResult>} finished */

@@ -403,6 +403,127 @@ test("FL-01 preserves a selected-Service startup diagnostic", () => {
   }
 });
 
+/** @param {boolean} localLoginHealthy */
+async function exerciseOpenListStartupTimeout(localLoginHealthy) {
+  const root = mkdtempSync(join(tmpdir(), "session-orchestrator-openlist-timeout-"));
+  const bin = join(root, "bin");
+  const credentialFile = join(root, "session-credential");
+  const summary = join(root, "summary");
+  const dockerLog = join(root, "docker.log");
+  const started = join(root, "started");
+  const database = join(root, "database.json");
+  const databaseCa = join(root, "database-ca.pem");
+  const key = join(root, "key.pem");
+  const cloudflared = join(root, "cloudflared");
+  mkdirSync(bin);
+  writeFileSync(credentialFile, credential, { mode: 0o600 });
+  writeFileSync(started, `${Math.floor(Date.now() / 1000)}\n`);
+  writeFileSync(database, JSON.stringify({
+    host: "mysql.internal.example",
+    port: 3306,
+    user: "openlist",
+    password: "database_secret_value",
+  }), { mode: 0o600 });
+  const openssl = spawnSync("openssl", [
+    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+    "-subj", "/CN=session-test.trycloudflare.com",
+    "-addext", "subjectAltName=DNS:session-test.trycloudflare.com",
+    "-keyout", key, "-out", databaseCa,
+  ]);
+  assert.equal(openssl.status, 0, openssl.stderr.toString());
+  chmodSync(databaseCa, 0o600);
+  copyFileSync(new URL("./fixtures/fake-cloudflared", import.meta.url).pathname, cloudflared);
+  chmodSync(cloudflared, 0o755);
+  symlinkSync(new URL("./fixtures/fake-docker", import.meta.url).pathname, join(bin, "docker"));
+
+  const local = createServer((request, response) => {
+    if (request.method === "POST" && request.url === "/api/auth/login") {
+      let body = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        const payload = JSON.parse(body);
+        if (localLoginHealthy && payload.username === "admin" && payload.password === credential) {
+          response.writeHead(200, { "content-type": "application/json" })
+            .end('{"code":200,"data":{"token":"test-token"}}');
+        } else response.writeHead(401).end('{"code":401}');
+      });
+    } else response.writeHead(404).end();
+  });
+  const publicServer = createSecureServer(
+    { key: readFileSync(key), cert: readFileSync(databaseCa) },
+    (_request, response) => response.writeHead(200).end("openlist"),
+  );
+  await listen(local, 58082);
+  await listen(publicServer, 0);
+  const address = publicServer.address();
+  assert.ok(address && typeof address === "object");
+
+  try {
+    const child = spawn(process.execPath, [
+      new URL("../src/session.mjs", import.meta.url).pathname,
+      "--service", "openlist",
+      "--credential-file", credentialFile,
+      "--cloudflared", cloudflared,
+      "--started-epoch-file", started,
+      "--database-file", database,
+      "--database-ca-file", databaseCa,
+    ], {
+      env: {
+        ...process.env,
+        FAKE_DOCKER_LOG: dockerLog,
+        FAKE_SESSION_ADDRESS: `https://session-test.trycloudflare.com:${address.port}`,
+        FAKE_TUNNEL_NOT_READY: "1",
+        GITHUB_STEP_SUMMARY: summary,
+        NODE_OPTIONS: `--require=${new URL("./fixtures/force-localhost.cjs", import.meta.url).pathname}`,
+        NODE_TLS_REJECT_UNAUTHORIZED: "0",
+        PATH: `${bin}:${process.env.PATH}`,
+        RUNNER_TEMP: root,
+        TSVC_TEST_STARTUP_TIMEOUT_MS: "1000",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    const exitCode = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("OpenList startup timeout test did not settle"));
+      }, 15_000);
+      child.once("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    return {
+      failureSummary: readFileSync(summary, "utf8"),
+      observable: `${output}${readFileSync(summary, "utf8")}${readFileSync(dockerLog, "utf8")}`,
+      status: exitCode,
+    };
+  } finally {
+    await close(local);
+    await close(publicServer);
+    rmSync(root, { recursive: true });
+  }
+}
+
+test("FL-01 startup timeout preserves the local OpenList login diagnostic", async () => {
+  const { failureSummary, observable, status } = await exerciseOpenListStartupTimeout(false);
+  assert.equal(status, 1, observable);
+  assert.match(failureSummary, /Diagnostic: Local OpenList login was not ready\./);
+  assert.doesNotMatch(failureSummary, /five minutes/);
+  assert.doesNotMatch(observable, new RegExp(`${credential}|database_secret_value`));
+});
+
+test("FL-01 startup timeout reports a Quick Tunnel that never becomes ready", async () => {
+  const { failureSummary, observable, status } = await exerciseOpenListStartupTimeout(true);
+  assert.equal(status, 1, observable);
+  assert.match(failureSummary, /Diagnostic: Quick Tunnel was not ready\./);
+  assert.doesNotMatch(failureSummary, /five minutes/);
+  assert.doesNotMatch(observable, new RegExp(`${credential}|database_secret_value`));
+});
+
 test("WF-03 rejects a Motrix Session without its required upload configuration", () => {
   const root = mkdtempSync(join(tmpdir(), "session-orchestrator-rclone-arguments-"));
   const credentialFile = join(root, "session-credential");

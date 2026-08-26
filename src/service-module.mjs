@@ -152,6 +152,7 @@ async function runLifecycle(options, ready, finished) {
       database,
     );
     await runCommand("docker", ["pull", resources.image], 10 * 60_000, options.cancellation);
+    console.log("Startup stage complete: Service image.");
     if (options.service === "motrix") {
       await prepareMotrixOperatorToken(resources, options.cancellation);
     }
@@ -162,8 +163,10 @@ async function runLifecycle(options, ready, finished) {
     await assertFreeSpace("startup");
     if (options.service === "openlist") {
       await prepareOpenList(resources, options.sessionAddress, options.cancellation);
+      console.log("Startup stage complete: OpenList database bootstrap.");
     }
     await startAdapter(resources, options.sessionAddress, options.cancellation);
+    console.log("Startup stage complete: Service container.");
     const container = resources.container;
     const containerExit = waitForContainerExit(container);
     await Promise.race([
@@ -443,7 +446,7 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
     "--entrypoint", "/bin/sh",
     resources.image,
     "-c",
-    'OPENLIST_ADMIN_PASSWORD="$(cat /run/secrets/session-credential)" || exit 64; [ -n "$OPENLIST_ADMIN_PASSWORD" ] || exit 65; export OPENLIST_ADMIN_PASSWORD; exec ./openlist admin',
+    'OPENLIST_ADMIN_PASSWORD="$(cat /run/secrets/session-credential)" || exit 64; [ -n "$OPENLIST_ADMIN_PASSWORD" ] || exit 65; export OPENLIST_ADMIN_PASSWORD; ./openlist admin >/dev/null 2>&1 && exec ./openlist admin set "$OPENLIST_ADMIN_PASSWORD" >/dev/null 2>&1',
   ], 120_000, cancellation).catch(() => {
     throw new FixedServiceError("startup", "OpenList database bootstrap failed.");
   });
@@ -919,6 +922,8 @@ function openlistDockerArgs(resources) {
  * @param {AbortSignal} cancellation
  */
 async function waitForReadiness(resources, credential, sessionAddress, cancellation) {
+  let openlistFailure = "local";
+  let localLoginComplete = false;
   while (!cancellation.aborted) {
     if (!(await containerRunning(resources.container, cancellation))) {
       if (cancellation.aborted) break;
@@ -927,12 +932,40 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
       }
       throw new FixedServiceError("startup", "Selected Service exited during startup.");
     }
+    if (resources.service === "openlist") {
+      try {
+        await openlistLocalLogin(credential);
+        if (!localLoginComplete) {
+          console.log("Startup stage complete: Local OpenList admin login.");
+          localLoginComplete = true;
+        }
+      } catch {
+        openlistFailure = "local";
+        await abortableDelay(1_000, cancellation);
+        continue;
+      }
+      try {
+        await httpStatus(`${sessionAddress}/`, {});
+        console.log("Startup stage complete: Public access.");
+        return;
+      } catch {
+        openlistFailure = "public";
+        await abortableDelay(1_000, cancellation);
+      }
+      continue;
+    }
     try {
       await requiredHealth(resources.service, credential, sessionAddress);
       return;
     } catch {
       await abortableDelay(1_000, cancellation);
     }
+  }
+  if (resources.service === "openlist") {
+    throw new FixedServiceError(
+      "startup",
+      openlistFailure === "local" ? "Local OpenList login was not ready." : "Public access was not ready.",
+    );
   }
   throw new FixedServiceError("startup", "Session startup was cancelled.");
 }
@@ -991,18 +1024,7 @@ async function requiredHealth(service, credential, sessionAddress) {
     return;
   }
   if (service === "openlist") {
-    const login = await httpJson(
-      `${localBase}/api/auth/login`,
-      {},
-      "POST",
-      JSON.stringify({ username: "admin", password: credential }),
-    );
-    if (
-      !login || typeof login !== "object" ||
-      /** @type {Record<string, unknown>} */ (login).code !== 200 ||
-      !/** @type {{ data?: { token?: unknown } }} */ (login).data ||
-      typeof /** @type {{ data: { token?: unknown } }} */ (login).data.token !== "string"
-    ) throw new Error("unhealthy");
+    await openlistLocalLogin(credential);
     await httpStatus(`${sessionAddress}/`, {});
     return;
   }
@@ -1011,6 +1033,22 @@ async function requiredHealth(service, credential, sessionAddress) {
     queryMotrixTasks(credential),
   ]);
   return tasks;
+}
+
+/** @param {string} credential */
+async function openlistLocalLogin(credential) {
+  const login = await httpJson(
+    `http://${ORIGIN_HOST}:${originPort("openlist")}/api/auth/login`,
+    {},
+    "POST",
+    JSON.stringify({ username: "admin", password: credential }),
+  );
+  if (
+    !login || typeof login !== "object" ||
+    /** @type {Record<string, unknown>} */ (login).code !== 200 ||
+    !/** @type {{ data?: { token?: unknown } }} */ (login).data ||
+    typeof /** @type {{ data: { token?: unknown } }} */ (login).data.token !== "string"
+  ) throw new Error("unhealthy");
 }
 
 /** @param {string} url @param {Record<string, string>} headers @param {string} [method] @param {string} [body] */

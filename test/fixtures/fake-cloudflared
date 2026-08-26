@@ -30,7 +30,7 @@ const server = createServer((request, response) => {
     return;
   }
   if (request.url === "/ready") {
-    response.writeHead(200).end("ready");
+    response.writeHead(process.env.FAKE_TUNNEL_NOT_READY === "1" ? 503 : 200).end("ready");
     return;
   }
   response.writeHead(404).end();

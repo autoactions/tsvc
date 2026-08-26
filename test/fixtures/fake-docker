@@ -8,6 +8,7 @@ appendFileSync(process.env.FAKE_DOCKER_LOG, `${JSON.stringify(args)}\n`);
 const stoppedMarker = `${process.env.FAKE_DOCKER_LOG}.stopped`;
 const motrixTokenPreparedMarker = `${process.env.FAKE_DOCKER_LOG}.motrix-token-prepared`;
 const openlistPreparedMarker = `${process.env.FAKE_DOCKER_LOG}.openlist-prepared`;
+const openlistAdminState = `${process.env.FAKE_DOCKER_LOG}.openlist-admin`;
 
 switch (args[0]) {
   case "pull":
@@ -35,7 +36,21 @@ switch (args[0]) {
     } else if (args.some((argument) => argument.endsWith("-openlist-configuration"))) {
       if (!existsSync(openlistPreparedMarker)) process.exitCode = 1;
     } else if (args.some((argument) => argument.endsWith("-openlist-bootstrap"))) {
-      if (!existsSync(openlistPreparedMarker)) process.exitCode = 1;
+      if (!existsSync(openlistPreparedMarker) || existsSync(`${process.env.FAKE_DOCKER_LOG}.openlist-bootstrap-failure`)) {
+        process.exitCode = 1;
+        break;
+      }
+      const credentialMount = args.find((argument) => argument.includes("target=/run/secrets/session-credential"));
+      const credentialSource = credentialMount?.match(/(?:^|,)source=([^,]+),target=\/run\/secrets\/session-credential(?:,|$)/)?.[1];
+      const script = args[args.indexOf("-c") + 1] ?? "";
+      if (!credentialSource || !script.includes("./openlist admin")) {
+        process.exitCode = 2;
+        break;
+      }
+      if (!existsSync(openlistAdminState)) writeFileSync(openlistAdminState, "generated-password");
+      if (script.includes("./openlist admin set")) {
+        writeFileSync(openlistAdminState, readFileSync(credentialSource, "utf8"));
+      }
     } else if (args.some((argument) => argument.endsWith("-token-permissions"))) {
       if (existsSync(`${process.env.FAKE_DOCKER_LOG}.token-permission-hang`)) {
         setInterval(() => {}, 1_000);

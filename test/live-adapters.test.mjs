@@ -9,12 +9,13 @@ import test from "node:test";
 import { runSelectedService } from "../src/service-module.mjs";
 
 const enabled = process.env.RUN_LIVE_ADAPTER_TESTS === "1";
+const openlistEnabled = enabled && Boolean(process.env.DATABASE && process.env.DATABASE_CA);
 const sessionCredential = "123456";
 const motrixOperatorToken = "M".repeat(43);
 
-/** @param {"chrome" | "motrix"} service */
+/** @param {"chrome" | "motrix" | "openlist"} service */
 function servicePort(service) {
-  return service === "chrome" ? 58080 : 58081;
+  return service === "chrome" ? 58080 : service === "motrix" ? 58081 : 58082;
 }
 
 /** @param {"chrome" | "motrix"} service @param {string} path @param {Record<string, string>} headers */
@@ -42,7 +43,7 @@ function websocketStatus(service, path, headers) {
   });
 }
 
-/** @param {"chrome" | "motrix"} service @param {string} credential @param {string[]} [additionalSensitiveValues] */
+/** @param {"chrome" | "motrix" | "openlist"} service @param {string} credential @param {string[]} [additionalSensitiveValues] */
 function assertLiveIsolation(service, credential, additionalSensitiveValues = []) {
   const ids = execFileSync("docker", ["ps", "--quiet", "--filter", `publish=${servicePort(service)}`], { encoding: "utf8" })
     .trim().split("\n").filter(Boolean);
@@ -66,14 +67,20 @@ function assertLiveIsolation(service, credential, additionalSensitiveValues = []
   }
 }
 
-/** @param {"chrome" | "motrix"} service */
+/** @param {"chrome" | "motrix" | "openlist"} service */
 async function withLiveService(service) {
   const root = mkdtempSync(join(tmpdir(), `live-${service}-`));
-  const credentialFile = join(root, service === "chrome" ? "session-credential" : "motrix-operator-token");
+  const credentialFile = join(root, service === "motrix" ? "motrix-operator-token" : "session-credential");
   const rcloneConfigFile = join(root, "rclone.conf");
-  const credential = service === "chrome" ? sessionCredential : motrixOperatorToken;
+  const databaseFile = join(root, "database.json");
+  const databaseCaFile = join(root, "database-ca.pem");
+  const credential = service === "motrix" ? motrixOperatorToken : sessionCredential;
   writeFileSync(credentialFile, credential, { mode: 0o600 });
   if (service === "motrix") writeFileSync(rcloneConfigFile, "[archive]\ntype = memory\n", { mode: 0o600 });
+  if (service === "openlist") {
+    writeFileSync(databaseFile, process.env.DATABASE ?? "", { mode: 0o600 });
+    writeFileSync(databaseCaFile, process.env.DATABASE_CA ?? "", { mode: 0o600 });
+  }
   const previousRunnerTemp = process.env.RUNNER_TEMP;
   process.env.RUNNER_TEMP = root;
   const cancellation = new AbortController();
@@ -94,6 +101,7 @@ async function withLiveService(service) {
           },
         }
       : {}),
+    ...(service === "openlist" ? { database: { file: databaseFile, caFile: databaseCaFile } } : {}),
   });
   try {
     await serviceRun.ready;
@@ -118,6 +126,32 @@ test("AU-01 pinned Chrome enforces native HTTP and GUI WebSocket authentication"
     assert.equal((await fetch("http://127.0.0.1:58080/", { headers: { authorization: correct } })).status, 200);
     assert.equal(await websocketStatus("chrome", "/websocket", { authorization: wrong }), 401);
     assert.equal(await websocketStatus("chrome", "/websocket", { authorization: correct }), 101);
+  } finally {
+    live.cancellation.abort();
+    assert.deepEqual(await live.serviceRun.finished, { status: "success" });
+    rmSync(live.root, { recursive: true });
+    if (live.previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = live.previousRunnerTemp;
+  }
+});
+
+test("AU-03 pinned OpenList authenticates with the current Session Credential", { skip: !openlistEnabled, timeout: 300_000 }, async () => {
+  const live = await withLiveService("openlist");
+  try {
+    assertLiveIsolation("openlist", sessionCredential);
+    /** @param {string} password */
+    const login = (password) => fetch("http://127.0.0.1:58082/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username: "admin", password }),
+    });
+    const rejected = await login("wrong-password");
+    assert.notEqual((await rejected.json()).code, 200);
+    const response = await login(sessionCredential);
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(payload.code, 200);
+    assert.equal(typeof payload.data?.token, "string");
   } finally {
     live.cancellation.abort();
     assert.deepEqual(await live.serviceRun.finished, { status: "success" });

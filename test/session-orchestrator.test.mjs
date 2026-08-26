@@ -59,6 +59,10 @@ test("RD-01 writes the Session Address only under ## Locators", () => {
   assert.doesNotMatch(ready, /`- Session Address:/);
   assert.match(source, /function locatorBlock[\s\S]*## Locators[\s\S]*Session Address: \$\{address\}/);
   assert.match(source, /console\.log\(locatorBlock\(sessionAddress\)/);
+  const readyStart = source.indexOf("writeReadySummary(");
+  const upload = source.indexOf("await uploadLocatorArtifact", readyStart);
+  const wait = source.indexOf("await Promise.race", upload);
+  assert.ok(readyStart > 0 && readyStart < upload && upload < wait);
 });
 
 test("RD-01 gates the Session Address and reduces a later failure Summary", async () => {
@@ -92,8 +96,13 @@ test("RD-01 gates the Session Address and reduces a later failure Summary", asyn
 
   const local = createServer(handler);
   local.on("upgrade", upgrade);
+  local.on("connection", (socket) => { socket.on("error", () => {}); });
   const publicServer = createSecureServer({ key: readFileSync(key), cert: readFileSync(certificate) }, handler);
   publicServer.on("upgrade", upgrade);
+  publicServer.on("connection", (socket) => { socket.on("error", () => {}); });
+  publicServer.on("secureConnection", (socket) => { socket.on("error", () => {}); });
+  publicServer.on("tlsClientError", () => {});
+  publicServer.on("clientError", (_error, socket) => { socket.destroy(); });
   await listen(local, 58080);
   await listen(publicServer, 0);
   const address = publicServer.address();
@@ -126,8 +135,14 @@ test("RD-01 gates the Session Address and reduces a later failure Summary", asyn
   try {
     assert.throws(() => readFileSync(summary), { code: "ENOENT" });
     await waitUntil(() => {
-      try { return readFileSync(summary, "utf8").includes("## Session Ready") || child.exitCode !== null; }
-      catch { return child.exitCode !== null; }
+      try {
+        return (
+          (readFileSync(summary, "utf8").includes("## Session Ready")
+            && readFileSync(join(root, "session-deck-output.md"), "utf8").includes("## Locators")
+            && output.includes("Session Ready."))
+          || child.exitCode !== null
+        );
+      } catch { return child.exitCode !== null; }
     });
     assert.equal(child.exitCode, null, output);
     assert.deepEqual(JSON.parse(readFileSync(cloudflaredArguments, "utf8")), [
@@ -136,6 +151,10 @@ test("RD-01 gates the Session Address and reduces a later failure Summary", asyn
     ]);
     assert.match(output, /Session Address: https:\/\/session-test\.trycloudflare\.com/);
     assert.match(output, /## Locators/);
+    assert.match(
+      readFileSync(join(root, "session-deck-output.md"), "utf8"),
+      /^## Locators\n- Session Address: https:\/\/session-test\.trycloudflare\.com(?::\d+)?\n$/,
+    );
     const readySummary = readFileSync(summary, "utf8");
     assert.match(readySummary, /## Locators\n\n- Session Address: https:\/\/session-test\.trycloudflare\.com/);
     assert.doesNotMatch(readySummary.split("## Locators")[1] ?? "", /Access:/);
@@ -221,6 +240,7 @@ test("UP-02 starts Motrix uploads when public validation is challenged", async (
   };
   const local = createServer(motrixHandler);
   local.on("upgrade", motrixUpgrade);
+  local.on("connection", (socket) => { socket.on("error", () => {}); });
   const publicServer = createSecureServer(
     { key: readFileSync(key), cert: readFileSync(certificate) },
     (_request, response) => {

@@ -113,6 +113,10 @@ jobs:
           lfs: false
           submodules: false
 
+      - name: Install Session runtime
+        shell: bash
+        run: npm ci --omit=dev
+
       - name: Acquire pinned cloudflared
         shell: bash
         run: scripts/acquire-cloudflared.sh

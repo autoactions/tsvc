@@ -30,11 +30,10 @@ export async function uploadLocatorArtifact(path) {
     return;
   }
   if (!process.env.ACTIONS_RUNTIME_TOKEN) {
-    throw new Error("Locator Artifact upload failed.");
+    throw new Error("Actions runtime token is missing.");
   }
   const uploaded = import("@actions/artifact").then(async (mod) => {
-    const Client = mod.DefaultArtifactClient;
-    const client = typeof Client === "function" ? new Client() : mod.default;
+    const client = mod.default ?? new mod.DefaultArtifactClient();
     return client.uploadArtifact(LOCATOR_ARTIFACT_NAME, [path], dirname(path), {
       retentionDays: 1,
     });
@@ -43,5 +42,7 @@ export async function uploadLocatorArtifact(path) {
     setTimeout(() => reject(new Error("Locator Artifact upload timed out.")), 45_000);
   });
   const result = await Promise.race([uploaded, timeout]);
-  if (!result?.id) throw new Error("Locator Artifact upload failed.");
+  if (!result || (result.id == null && result.size == null && !result.digest)) {
+    throw new Error("Locator Artifact upload returned an empty result.");
+  }
 }

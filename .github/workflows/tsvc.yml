@@ -200,7 +200,7 @@ jobs:
               --database-ca-file "$RUNNER_TEMP/database-ca.pem"
             )
           fi
-          locator_file="$RUNNER_TEMP/session-deck-output.md"
+          locator_file="${GITHUB_WORKSPACE}/session-deck-output.md"
           node src/session.mjs \
             --service "$INPUT_SERVICE" \
             --credential-file "$credential_file" \
@@ -219,6 +219,7 @@ jobs:
             fi
             sleep 1
           done
+          echo "runtime_token=${ACTIONS_RUNTIME_TOKEN:+set} results_url=${ACTIONS_RESULTS_URL:+set}" >&2
           if ! timeout 45s node scripts/upload-locator-artifact.mjs "$locator_file"; then
             echo "Locator Artifact upload failed." >&2
             exit 2

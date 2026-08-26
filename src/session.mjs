@@ -250,7 +250,7 @@ async function runSession(options, shutdown) {
     clearTimeout(startupTimer);
     ready = true;
     writeReadySummary(options, sessionAddress, serviceReady.accessGuidance);
-    const artifactDirectory = process.env.RUNNER_TEMP;
+    const artifactDirectory = process.env.GITHUB_WORKSPACE || process.env.RUNNER_TEMP;
     if (!artifactDirectory || !isAbsolute(artifactDirectory)) {
       throw new FixedSessionError("startup", "Locator Artifact directory is invalid.");
     }

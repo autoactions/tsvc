@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const credential = "E".repeat(43);
-const basic = `Basic ${Buffer.from(`session:${credential}`).toString("base64")}`;
+const basic = `Basic ${Buffer.from(`admin:${credential}`).toString("base64")}`;
 
 /** @param {import("node:http").IncomingMessage} request @param {import("node:http").ServerResponse} response */
 function handler(request, response) {

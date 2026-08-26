@@ -858,7 +858,7 @@ function chromeDockerArgs(resources) {
     ...commonDockerArgs(resources),
     "--shm-size", "1g",
     "--env", "START_DOCKER=false",
-    "--env", "CUSTOM_USER=session",
+    "--env", "CUSTOM_USER=admin",
     "--env", "FILE__PASSWORD=/run/secrets/session-credential",
     "--mount", `type=volume,source=${resources.volumes[0]},target=/config`,
     "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/session-credential,readonly`,
@@ -1253,7 +1253,7 @@ function asServiceFailure(error, fallbackPhase) {
 /** @param {Service} service */
 function accessGuidance(service) {
   if (service === "chrome") {
-    return "Use native Basic Auth with username `session` and the Session Credential.";
+    return "Use native Basic Auth with username `admin` and the Session Credential.";
   }
   if (service === "motrix") return "Use the native Motrix login with the Motrix Operator Token.";
   return "Use the native OpenList login with username `admin` and the Session Credential.";

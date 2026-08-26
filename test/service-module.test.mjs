@@ -28,7 +28,7 @@ function serviceOrigin(service) {
 
 /** @param {Service} service @param {{ healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
 function startServiceServer(service, health) {
-  const basic = `Basic ${Buffer.from(`session:${credential}`).toString("base64")}`;
+  const basic = `Basic ${Buffer.from(`admin:${credential}`).toString("base64")}`;
   const bearer = `Bearer ${credential}`;
   const server = createServer((request, response) => {
     if (!health.healthy) {
@@ -261,7 +261,7 @@ test("AU-01 and IS-01 Chrome uses native file-backed authentication and one conf
   assert.doesNotMatch(JSON.stringify(run), /58081/);
   assert.ok(run.includes("1g"));
   assert.ok(run.includes("START_DOCKER=false"));
-  assert.ok(run.includes("CUSTOM_USER=session"));
+  assert.ok(run.includes("CUSTOM_USER=admin"));
   assert.ok(run.includes("FILE__PASSWORD=/run/secrets/session-credential"));
   assert.doesNotMatch(JSON.stringify(commands), new RegExp(credential));
   assert.doesNotMatch(JSON.stringify(run), /3001|8082|privileged|unconfined|docker\.sock/);

@@ -132,7 +132,6 @@ async function exerciseAdapter(service, termination = "cancel", onReady) {
       port: 3306,
       user: "openlist",
       password: "database_secret_value",
-      name: "openlist",
     }), { mode: 0o600 });
     const key = join(root, "database-ca-key.pem");
     const generated = spawnSync("openssl", [
@@ -237,7 +236,19 @@ test("AU-01 and IS-01 Chrome uses native file-backed authentication and one conf
 });
 
 test("AU-03, IS-01, and PS-01 OpenList bootstraps a persistent database behind one confined Origin", async () => {
-  const { commands, result, root } = await exerciseAdapter("openlist");
+  const { commands, result, root } = await exerciseAdapter("openlist", "cancel", async ({ dockerLog }) => {
+    const activeCommands = readFileSync(dockerLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const permission = activeCommands.find((command) =>
+      command.some((/** @type {string} */ argument) => argument.endsWith("-openlist-permissions"))
+    );
+    const configMount = permission?.find((/** @type {string} */ argument) =>
+      argument.includes("target=/run/secrets/openlist-config")
+    );
+    const configSource = configMount?.match(/(?:^|,)source=([^,]+),target=/)?.[1];
+    assert.ok(configSource);
+    const config = JSON.parse(readFileSync(configSource, "utf8"));
+    assert.equal(config.database.name, "openlist");
+  });
   const permission = commands.find((command) => command.some((/** @type {string} */ argument) => argument.endsWith("-openlist-permissions")));
   const configuration = commands.find((command) => command.some((/** @type {string} */ argument) => argument.endsWith("-openlist-configuration")));
   const bootstrap = commands.find((command) => command.some((/** @type {string} */ argument) => argument.endsWith("-openlist-bootstrap")));

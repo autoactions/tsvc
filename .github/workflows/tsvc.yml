@@ -161,8 +161,8 @@ jobs:
         if: ${{ inputs.service == 'motrix' }}
         shell: bash
         env:
-          MOTRIX_OPERATOR_TOKEN: ${{ secrets.MOTRIX_OPERATOR_TOKEN }}
-        run: node scripts/stage-motrix-operator-token.mjs "$RUNNER_TEMP/motrix-operator-token"
+          SESSION_PASSWORD: ${{ secrets.SESSION_PASSWORD }}
+        run: node scripts/stage-motrix-operator-token.mjs "$RUNNER_TEMP/motrix-operator-token" "$RUNNER_TEMP/sensitive-facts"
 
       - name: Stage Rclone configuration
         if: ${{ inputs.service == 'motrix' }}
@@ -181,8 +181,10 @@ jobs:
           upload_args=()
           database_args=()
           credential_file="$RUNNER_TEMP/session-credential"
+          sensitive_args=()
           if [[ "$INPUT_SERVICE" == "motrix" ]]; then
             credential_file="$RUNNER_TEMP/motrix-operator-token"
+            sensitive_args+=(--sensitive-facts-file "$RUNNER_TEMP/sensitive-facts")
             upload_args+=(
               --rclone-config-file "$RUNNER_TEMP/rclone.conf"
               --rclone-destinations-file "$RUNNER_TEMP/rclone-destinations.json"
@@ -199,6 +201,7 @@ jobs:
             --credential-file "$credential_file" \
             --cloudflared "$RUNNER_TEMP/cloudflared" \
             --started-epoch-file "$RUNNER_TEMP/session-started-epoch" \
+            "${sensitive_args[@]}" \
             "${upload_args[@]}" \
             "${database_args[@]}"
 
@@ -226,5 +229,6 @@ jobs:
             "$RUNNER_TEMP/session-started-epoch" \
             "$RUNNER_TEMP/session-credential" \
             "$RUNNER_TEMP/motrix-operator-token" \
+            "$RUNNER_TEMP/sensitive-facts" \
             "$RUNNER_TEMP/database.json" \
             "$RUNNER_TEMP/database-ca.pem"

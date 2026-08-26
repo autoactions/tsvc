@@ -30,7 +30,7 @@ test("SC-04 stages canonical database JSON and a CA bundle as mode-0600 files", 
   const caPath = join(root, "database-ca.pem");
   const database = {
     host: "mysql.internal.example", port: 3306, user: "openlist",
-    password: "database-secret", name: "openlist",
+    password: "database-secret",
   };
   const ca = certificate();
   try {
@@ -53,12 +53,15 @@ test("SC-04 stages canonical database JSON and a CA bundle as mode-0600 files", 
 
 test("SC-04 rejects invalid or existing targets without disclosing Secret values", () => {
   const secret = "database-password-not-for-output";
-  /** @type {[string, string, string][]} */
+  const database = { host: "mysql.internal.example", port: 3306, user: "u", password: secret };
+  /** @type {[string, string, string, number][]} */
   const cases = [
-    [databaseScript, "DATABASE", JSON.stringify({ host: "bad_host", port: 3306, user: "u", password: secret, name: "db" })],
-    [caScript, "DATABASE_CA", `not-a-certificate-${secret}`],
+    [databaseScript, "DATABASE", JSON.stringify({ ...database, host: "bad_host" }), 2],
+    [databaseScript, "DATABASE", JSON.stringify({ ...database, name: "openlist" }), 2],
+    [databaseScript, "DATABASE", JSON.stringify(database), 1],
+    [caScript, "DATABASE_CA", `not-a-certificate-${secret}`, 2],
   ];
-  for (const [script, envName, value] of cases) {
+  for (const [script, envName, value, expectedStatus] of cases) {
     const root = mkdtempSync(join(tmpdir(), "database-staging-invalid-"));
     const destination = join(root, "secret");
     writeFileSync(destination, "existing", { mode: 0o600 });
@@ -66,7 +69,7 @@ test("SC-04 rejects invalid or existing targets without disclosing Secret values
       const result = spawnSync(process.execPath, [script, destination], {
         env: { ...process.env, [envName]: value },
       });
-      assert.notEqual(result.status, 0);
+      assert.equal(result.status, expectedStatus);
       assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(secret));
       assert.equal(readFileSync(destination, "utf8"), "existing");
     } finally {
@@ -81,7 +84,7 @@ test("SC-04 does not accept legacy OpenList environment variables", () => {
   const caPath = join(root, "database-ca.pem");
   const database = JSON.stringify({
     host: "mysql.internal.example", port: 3306, user: "openlist",
-    password: "database-secret", name: "openlist",
+    password: "database-secret",
   });
   const ca = certificate();
   try {

@@ -9,7 +9,6 @@ test("SC-04 accepts only the closed database configuration", () => {
     port: 3306,
     user: "openlist_user",
     password: "p@ss:w?rd#value",
-    name: "openlist",
   };
   assert.deepEqual(parseDatabase(JSON.stringify(expected)), expected);
 
@@ -26,6 +25,6 @@ test("SC-04 accepts only the closed database configuration", () => {
     JSON.stringify({ ...expected, user: "user:name" }),
     JSON.stringify({ ...expected, password: "" }),
     JSON.stringify({ ...expected, password: "line\nvalue" }),
-    JSON.stringify({ ...expected, name: "openlist-db" }),
+    JSON.stringify({ ...expected, name: "openlist" }),
   ]) assert.throws(() => parseDatabase(value));
 });

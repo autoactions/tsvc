@@ -35,6 +35,7 @@ const ARGUMENT_NAMES = new Set([
   "rclone-destinations-file",
   "database-file",
   "database-ca-file",
+  "sensitive-facts-file",
 ]);
 
 /** @typedef {"chrome" | "motrix" | "openlist"} Service */
@@ -46,6 +47,7 @@ const ARGUMENT_NAMES = new Set([
  *   startedEpochFile: string,
  *   upload?: { rcloneConfigFile: string, destinationsFile: string },
  *   database?: { file: string, caFile: string },
+ *   sensitiveFactsFile?: string,
  * }} SessionOptions
  */
 
@@ -105,11 +107,15 @@ function parseArguments(argv) {
   const rcloneDestinationsFile = values["rclone-destinations-file"];
   const databaseFile = values["database-file"];
   const databaseCaFile = values["database-ca-file"];
+  const sensitiveFactsFile = values["sensitive-facts-file"];
   if (
     (service !== "chrome" && service !== "motrix" && service !== "openlist") ||
     !credentialFile || !cloudflared || !startedEpochFile ||
     ![credentialFile, cloudflared, startedEpochFile].every(isAbsolute)
   ) {
+    throw new FixedSessionError("startup", "Session arguments are invalid.");
+  }
+  if (sensitiveFactsFile && !isAbsolute(sensitiveFactsFile)) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
   if (
@@ -138,6 +144,7 @@ function parseArguments(argv) {
     service, credentialFile, cloudflared, startedEpochFile,
     ...(upload ? { upload } : {}),
     ...(database ? { database } : {}),
+    ...(sensitiveFactsFile ? { sensitiveFactsFile } : {}),
   };
 }
 
@@ -150,6 +157,7 @@ function validateRunnerTemporaryPaths(options) {
   const paths = [options.credentialFile, options.cloudflared, options.startedEpochFile];
   if (options.upload) paths.push(options.upload.rcloneConfigFile, options.upload.destinationsFile);
   if (options.database) paths.push(options.database.file, options.database.caFile);
+  if (options.sensitiveFactsFile) paths.push(options.sensitiveFactsFile);
   for (const path of paths) {
     const resolved = resolve(path);
     const metadata = lstatSync(resolved);
@@ -167,6 +175,9 @@ function validateRunnerTemporaryPaths(options) {
       (!metadata.isFile() || (metadata.mode & 0o077) !== 0)
     ) {
       throw new FixedSessionError("startup", "Database configuration file is invalid.");
+    }
+    if (path === options.sensitiveFactsFile && (!metadata.isFile() || (metadata.mode & 0o077) !== 0)) {
+      throw new FixedSessionError("startup", "Sensitive Facts file is invalid.");
     }
   }
 }
@@ -240,6 +251,7 @@ async function runSession(options, shutdown) {
     writeReadySummary(options, sessionAddress, serviceReady.accessGuidance);
     console.log("Session Ready.");
     console.log(locatorBlock(sessionAddress).trimEnd());
+    if (options.sensitiveFactsFile) console.log(readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());
 
     await Promise.race([
       serviceFinishedAsFailure(serviceRun.finished),
@@ -281,6 +293,15 @@ async function runSession(options, shutdown) {
           if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
             console.error("Database configuration cleanup was incomplete.");
           }
+        }
+      }
+    }
+    if (options.sensitiveFactsFile) {
+      try {
+        unlinkSync(options.sensitiveFactsFile);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+          console.error("Sensitive Facts cleanup was incomplete.");
         }
       }
     }
@@ -388,7 +409,7 @@ function writeReadySummary(options, address, guidance) {
   }
   const readinessTime = new Date();
   const expectedExpiry = new Date((startedEpoch + 330 * 60) * 1_000);
-  writeFileSync(summary, [
+  const lines = [
     "## Session Ready",
     "",
     `- Service: ${options.service}`,
@@ -396,8 +417,22 @@ function writeReadySummary(options, address, guidance) {
     `- Expected expiry: ${expectedExpiry.toISOString()}`,
     `- Access: ${guidance}`,
     "",
-    locatorBlock(address),
-  ].join("\n"), { mode: 0o600 });
+    locatorBlock(address).trimEnd(),
+  ];
+  if (options.sensitiveFactsFile) lines.push("", readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());
+  writeFileSync(summary, `${lines.join("\n")}\n`, { mode: 0o600 });
+}
+
+/** @param {string} path */
+function readSensitiveFactsBlock(path) {
+  const block = readFileSync(path, "utf8");
+  if (
+    Buffer.byteLength(block, "utf8") > 16_384 ||
+    !/^## Sensitive Facts\n\n(?:- [^:\r\n]{1,80}: enc:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+\n)+$/.test(block)
+  ) {
+    throw new FixedSessionError("startup", "Sensitive Facts file is invalid.");
+  }
+  return block;
 }
 
 /** @param {string} address */

@@ -288,7 +288,7 @@ class OwnedResources {
    * @param {string} credentialFile
    * @param {string} tempRoot
    * @param {{ rcloneConfigFile: string, destinations: { id: string, localRoot: string, destination: string }[] } | undefined} upload
-   * @param {{ connection: { host: string, port: number, user: string, password: string, name: string }, caFile: string } | undefined} database
+   * @param {{ connection: { host: string, port: number, user: string, password: string }, caFile: string } | undefined} database
    */
   constructor(service, credentialFile, tempRoot, upload, database) {
     this.service = service;
@@ -363,7 +363,7 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
       port: database.connection.port,
       user: database.connection.user,
       password: database.connection.password,
-      name: database.connection.name,
+      name: "openlist",
       db_file: "",
       table_prefix: "x_",
       ssl_mode: "true",
@@ -541,7 +541,7 @@ async function readDatabaseConfiguration(databaseFile, databaseCaFile) {
  * @param {string} runnerTemp
  * @param {AbortSignal} cancellation
  * @param {{ rcloneConfigFile: string, destinations: { id: string, localRoot: string, destination: string }[] } | undefined} upload
- * @param {{ connection: { host: string, port: number, user: string, password: string, name: string }, caFile: string } | undefined} database
+ * @param {{ connection: { host: string, port: number, user: string, password: string }, caFile: string } | undefined} database
  */
 async function createOwnedResources(service, credentialFile, runnerTemp, cancellation, upload, database) {
   const tempRoot = await mkdtemp(join(runnerTemp, "temporary-session-"));

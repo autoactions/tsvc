@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createDecipheriv, pbkdf2Sync } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,53 +7,72 @@ import { join } from "node:path";
 import test from "node:test";
 
 const script = new URL("../scripts/stage-motrix-operator-token.mjs", import.meta.url).pathname;
+const password = "shared-session-password";
 
-/** @param {string} token @param {string} destination */
-function stage(token, destination) {
-  return spawnSync(process.execPath, [script, destination], {
-    env: { ...process.env, MOTRIX_OPERATOR_TOKEN: token },
+/** @param {string} tokenDestination @param {string} factsDestination @param {string} [secret] */
+function stage(tokenDestination, factsDestination, secret = password) {
+  return spawnSync(process.execPath, [script, tokenDestination, factsDestination], {
+    env: { ...process.env, SESSION_PASSWORD: secret },
   });
 }
 
-test("SC-01 stages 43-128 character Motrix Operator Tokens in a mode-0600 file", () => {
-  for (const token of ["A".repeat(43), `${"a".repeat(125)}_-0`, "Z".repeat(128)]) {
-    const directory = mkdtempSync(join(tmpdir(), "motrix-operator-token-test-"));
-    const destination = join(directory, "motrix-operator-token");
-    const result = stage(token, destination);
+/** @param {string} block */
+function decryptToken(block) {
+  const match = block.match(/^- Motrix Operator Token: enc:v1:([^:]+):([^:]+):([^\s]+)$/m);
+  assert.ok(match);
+  const salt = Buffer.from(match[1] ?? "", "base64url");
+  const iv = Buffer.from(match[2] ?? "", "base64url");
+  const encrypted = Buffer.from(match[3] ?? "", "base64url");
+  const key = pbkdf2Sync(password, salt, 600_000, 32, "sha256");
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAAD(Buffer.from("session-deck-sensitive-fact:v1:Motrix Operator Token"));
+  decipher.setAuthTag(encrypted.subarray(-16));
+  return Buffer.concat([decipher.update(encrypted.subarray(0, -16)), decipher.final()]).toString("utf8");
+}
 
+test("SC-01 generates a fresh mode-0600 Motrix Token and matching encrypted fact", () => {
+  const tokens = [];
+  for (let index = 0; index < 2; index++) {
+    const directory = mkdtempSync(join(tmpdir(), "motrix-operator-token-test-"));
+    const tokenDestination = join(directory, "motrix-operator-token");
+    const factsDestination = join(directory, "sensitive-facts");
+    const result = stage(tokenDestination, factsDestination);
     assert.equal(result.status, 0, result.stderr.toString());
     assert.equal(result.stdout.toString(), "");
-    assert.equal(result.stderr.toString(), "");
-    assert.equal(readFileSync(destination, "utf8"), token);
-    assert.equal(statSync(destination).mode & 0o777, 0o600);
+    const token = readFileSync(tokenDestination, "utf8");
+    const block = readFileSync(factsDestination, "utf8");
+    assert.match(token, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(decryptToken(block), token);
+    assert.doesNotMatch(block, new RegExp(token));
+    assert.equal(statSync(tokenDestination).mode & 0o777, 0o600);
+    assert.equal(statSync(factsDestination).mode & 0o777, 0o600);
+    tokens.push(token);
     rmSync(directory, { recursive: true });
   }
+  assert.notEqual(tokens[0], tokens[1]);
 });
 
-test("SC-01 rejects invalid Motrix Operator Tokens without disclosure or output", () => {
-  const invalid = ["", "A".repeat(42), "A".repeat(129), `${"A".repeat(42)}!`, `${"A".repeat(42)} `];
-  for (const token of invalid) {
-    const directory = mkdtempSync(join(tmpdir(), "motrix-operator-token-test-"));
-    const destination = join(directory, "motrix-operator-token");
-    const result = stage(token, destination);
-
-    assert.notEqual(result.status, 0);
-    assert.equal(result.stdout.toString(), "");
-    assert.doesNotMatch(result.stderr.toString(), new RegExp(token || "token-must-not-appear"));
-    assert.throws(() => statSync(destination), { code: "ENOENT" });
-    rmSync(directory, { recursive: true });
-  }
-});
-
-test("SC-01 refuses to overwrite an existing Motrix Operator Token file", () => {
+test("SC-01 rejects missing encryption input without disclosure or output", () => {
   const directory = mkdtempSync(join(tmpdir(), "motrix-operator-token-test-"));
-  const destination = join(directory, "motrix-operator-token");
-  writeFileSync(destination, "existing", { mode: 0o600 });
-  const token = "A".repeat(43);
-  const result = stage(token, destination);
-
+  const tokenDestination = join(directory, "motrix-operator-token");
+  const factsDestination = join(directory, "sensitive-facts");
+  const result = stage(tokenDestination, factsDestination, "");
   assert.notEqual(result.status, 0);
-  assert.equal(readFileSync(destination, "utf8"), "existing");
-  assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(token));
+  assert.equal(result.stdout.toString(), "");
+  assert.doesNotMatch(result.stderr.toString(), /SESSION_PASSWORD|shared-session-password/);
+  assert.throws(() => statSync(tokenDestination), { code: "ENOENT" });
+  assert.throws(() => statSync(factsDestination), { code: "ENOENT" });
+  rmSync(directory, { recursive: true });
+});
+
+test("SC-01 refuses to overwrite either destination", () => {
+  const directory = mkdtempSync(join(tmpdir(), "motrix-operator-token-test-"));
+  const tokenDestination = join(directory, "motrix-operator-token");
+  const factsDestination = join(directory, "sensitive-facts");
+  writeFileSync(tokenDestination, "existing", { mode: 0o600 });
+  const result = stage(tokenDestination, factsDestination);
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(tokenDestination, "utf8"), "existing");
+  assert.throws(() => statSync(factsDestination), { code: "ENOENT" });
   rmSync(directory, { recursive: true });
 });

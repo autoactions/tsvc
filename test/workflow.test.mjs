@@ -164,11 +164,12 @@ test("WF-01 workflow pins its immutable execution policy", () => {
   assert.match(chromeCredentialStep, /SESSION_PASSWORD: \$\{\{ secrets\.SESSION_PASSWORD \}\}/);
   assert.doesNotMatch(chromeCredentialStep, /MOTRIX_OPERATOR_TOKEN/);
   assert.match(motrixCredentialStep, /if: \$\{\{ inputs\.service == 'motrix' \}\}/);
-  assert.match(motrixCredentialStep, /MOTRIX_OPERATOR_TOKEN: \$\{\{ secrets\.MOTRIX_OPERATOR_TOKEN \}\}/);
-  assert.doesNotMatch(motrixCredentialStep, /SESSION_PASSWORD/);
+  assert.match(motrixCredentialStep, /SESSION_PASSWORD: \$\{\{ secrets\.SESSION_PASSWORD \}\}/);
+  assert.doesNotMatch(motrixCredentialStep, /MOTRIX_OPERATOR_TOKEN/);
   assert.match(workflow, /credential_file="\$RUNNER_TEMP\/session-credential"/);
   assert.match(workflow, /if \[\[ "\$INPUT_SERVICE" == "motrix" \]\]; then\n\s+credential_file="\$RUNNER_TEMP\/motrix-operator-token"/);
   assert.match(workflow, /--credential-file "\$credential_file"/);
+  assert.match(workflow, /--sensitive-facts-file "\$RUNNER_TEMP\/sensitive-facts"/);
   assert.match(workflow, /RCLONE_CONFIG_CONFIGURED: \$\{\{ secrets\.RCLONE_CONFIG != '' \}\}/);
   assert.match(workflow, /RCLONE_CONFIG: \$\{\{ secrets\.RCLONE_CONFIG \}\}/);
   assert.match(workflow, /RCLONE_DESTINATIONS: \$\{\{ vars\.RCLONE_DESTINATIONS \}\}/);
@@ -200,6 +201,8 @@ test("WF-01 workflow pins its immutable execution policy", () => {
   assert.match(workflow, /"\$RUNNER_TEMP\/database\.json"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/database-ca\.pem"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/session-credential" \\\n\s+"\$RUNNER_TEMP\/motrix-operator-token"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/sensitive-facts"/);
+  assert.doesNotMatch(workflow, /secrets\.MOTRIX_OPERATOR_TOKEN/);
 
   const uses = [...workflow.matchAll(/uses:\s+([^\s]+)/g)].map((entry) => entry[1]);
   assert.deepEqual(uses, [

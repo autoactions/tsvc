@@ -256,9 +256,9 @@ async function runSession(options, shutdown) {
     }
     writeLocatorArtifact({
       address: sessionAddress,
-      sensitiveFacts: options.sensitiveFactsFile
-        ? readSensitiveFactsBlock(options.sensitiveFactsFile)
-        : undefined,
+      ...(options.sensitiveFactsFile
+        ? { sensitiveFacts: readSensitiveFactsBlock(options.sensitiveFactsFile) }
+        : {}),
       directory: artifactDirectory,
     });
     console.log("Session Ready.");

@@ -113,10 +113,6 @@ jobs:
           lfs: false
           submodules: false
 
-      - name: Install Session runtime
-        shell: bash
-        run: npm ci --omit=dev
-
       - name: Acquire pinned cloudflared
         shell: bash
         run: scripts/acquire-cloudflared.sh
@@ -175,7 +171,7 @@ jobs:
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
         run: node scripts/stage-rclone-config.mjs "$RUNNER_TEMP/rclone.conf"
 
-      - name: Run Session
+      - name: Start Session
         id: session
         shell: bash
         env:
@@ -201,31 +197,82 @@ jobs:
             )
           fi
           locator_file="${GITHUB_WORKSPACE}/session-deck-output.md"
-          node src/session.mjs \
+          session_log="$RUNNER_TEMP/session.log"
+          : > "$session_log"
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'term() { if [[ -n "${child:-}" ]]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" || true; fi; printf "%s\n" "${1:-1}" > "${RUNNER_TEMP}/session.exit"; exit "${1:-1}"; }' \
+            'trap "term 1" TERM INT' \
+            'node src/session.mjs "$@" &' \
+            'child=$!' \
+            'wait "$child"' \
+            'status=$?' \
+            'trap - TERM INT' \
+            'printf "%s\n" "$status" > "${RUNNER_TEMP}/session.exit"' \
+            'exit "$status"' \
+            > "$RUNNER_TEMP/session-wrapper.sh"
+          chmod +x "$RUNNER_TEMP/session-wrapper.sh"
+          setsid "$RUNNER_TEMP/session-wrapper.sh" \
             --service "$INPUT_SERVICE" \
             --credential-file "$credential_file" \
             --cloudflared "$RUNNER_TEMP/cloudflared" \
             --started-epoch-file "$RUNNER_TEMP/session-started-epoch" \
             "${sensitive_args[@]}" \
             "${upload_args[@]}" \
-            "${database_args[@]}" &
+            "${database_args[@]}" \
+            >> "$session_log" 2>&1 < /dev/null &
           session_pid=$!
-          trap 'kill "$session_pid" 2>/dev/null || true; wait "$session_pid" || true' EXIT
+          printf '%s\n' "$session_pid" > "$RUNNER_TEMP/session.pid"
+          tail -F "$session_log" &
+          tail_pid=$!
+          trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
           while [[ ! -f "$locator_file" ]]; do
             if ! kill -0 "$session_pid" 2>/dev/null; then
-              trap - EXIT
+              kill "$tail_pid" 2>/dev/null || true
+              wait "$tail_pid" 2>/dev/null || true
               wait "$session_pid"
               exit $?
             fi
             sleep 1
           done
-          echo "runtime_token=${ACTIONS_RUNTIME_TOKEN:+set} results_url=${ACTIONS_RESULTS_URL:+set}" >&2
-          if ! timeout 45s node scripts/upload-locator-artifact.mjs "$locator_file"; then
-            echo "Locator Artifact upload failed." >&2
-            exit 2
-          fi
+          kill "$tail_pid" 2>/dev/null || true
+          wait "$tail_pid" 2>/dev/null || true
           trap - EXIT
-          wait "$session_pid"
+
+      # actions/upload-artifact v7.0.1, reviewed 2026-08-26.
+      - name: Upload Session Deck Locator Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: session-deck-locators
+          path: session-deck-output.md
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Wait for Session
+        if: ${{ always() && steps.session.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          session_pid="$(cat "$RUNNER_TEMP/session.pid")"
+          session_log="$RUNNER_TEMP/session.log"
+          tail -n +1 -F "$session_log" &
+          tail_pid=$!
+          term() {
+            kill "$tail_pid" 2>/dev/null || true
+            if kill -0 "$session_pid" 2>/dev/null; then
+              kill -TERM -- "-$session_pid" 2>/dev/null || kill -TERM "$session_pid" 2>/dev/null || true
+            fi
+            while kill -0 "$session_pid" 2>/dev/null; do sleep 1; done
+            wait "$tail_pid" 2>/dev/null || true
+          }
+          trap term EXIT INT TERM
+          while kill -0 "$session_pid" 2>/dev/null; do
+            sleep 1
+          done
+          trap - EXIT INT TERM
+          kill "$tail_pid" 2>/dev/null || true
+          wait "$tail_pid" 2>/dev/null || true
+          exit "$(cat "$RUNNER_TEMP/session.exit")"
 
       - name: Record pre-readiness failure
         if: ${{ failure() && steps.session.outcome != 'success' }}
@@ -253,4 +300,8 @@ jobs:
             "$RUNNER_TEMP/motrix-operator-token" \
             "$RUNNER_TEMP/sensitive-facts" \
             "$RUNNER_TEMP/database.json" \
-            "$RUNNER_TEMP/database-ca.pem"
+            "$RUNNER_TEMP/database-ca.pem" \
+            "$RUNNER_TEMP/session.log" \
+            "$RUNNER_TEMP/session.pid" \
+            "$RUNNER_TEMP/session.exit" \
+            "$RUNNER_TEMP/session-wrapper.sh"

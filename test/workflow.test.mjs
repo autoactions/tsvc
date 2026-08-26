@@ -207,5 +207,13 @@ test("WF-01 workflow pins its immutable execution policy", () => {
   const uses = [...workflow.matchAll(/uses:\s+([^\s]+)/g)].map((entry) => entry[1]);
   assert.deepEqual(uses, [
     "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
   ]);
+  assert.match(workflow, /setsid "\$RUNNER_TEMP\/session-wrapper\.sh"/);
+  assert.match(
+    workflow,
+    /name: session-deck-locators\n\s+path: session-deck-output\.md\n\s+if-no-files-found: error\n\s+retention-days: 1/,
+  );
+  assert.match(workflow, /if: \$\{\{ always\(\) && steps\.session\.outcome == 'success' \}\}/);
+  assert.doesNotMatch(workflow, /npm ci|upload-locator-artifact|ACTIONS_RUNTIME_TOKEN|@actions\/artifact/);
 });

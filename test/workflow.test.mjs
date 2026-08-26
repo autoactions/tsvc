@@ -215,5 +215,12 @@ test("WF-01 workflow pins its immutable execution policy", () => {
     /name: session-deck-locators\n\s+path: session-deck-output\.md\n\s+if-no-files-found: error\n\s+retention-days: 1/,
   );
   assert.match(workflow, /if: \$\{\{ always\(\) && steps\.session\.outcome == 'success' \}\}/);
+  assert.match(workflow, /scripts\/reap-session\.sh "\$session_pid" 0/);
+  assert.match(workflow, /scripts\/reap-session\.sh "\$\(cat "\$RUNNER_TEMP\/session\.pid"\)" 5/);
+  const waitStep = workflow.match(
+    /- name: Wait for Session\n[\s\S]*?run: \|\n([\s\S]*?)\n\s+- name: Record pre-readiness failure/,
+  )?.[1] ?? "";
+  assert.match(waitStep, /interrupt\(\) \{\n\s+kill "\$tail_pid"[\s\S]*?exit 143\n\s+\}/);
+  assert.doesNotMatch(waitStep, /interrupt\(\) \{[^}]*while kill -0/);
   assert.doesNotMatch(workflow, /npm ci|upload-locator-artifact|ACTIONS_RUNTIME_TOKEN|@actions\/artifact/);
 });

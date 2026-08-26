@@ -225,19 +225,26 @@ jobs:
           printf '%s\n' "$session_pid" > "$RUNNER_TEMP/session.pid"
           tail -F "$session_log" &
           tail_pid=$!
-          trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+          session_handed_off=0
+          stop_start() {
+            kill "$tail_pid" 2>/dev/null || true
+            if [[ "$session_handed_off" != 1 ]]; then
+              scripts/reap-session.sh "$session_pid" 0 || true
+            fi
+          }
+          trap stop_start EXIT
+          trap 'stop_start; exit 143' INT TERM
           while [[ ! -f "$locator_file" ]]; do
             if ! kill -0 "$session_pid" 2>/dev/null; then
-              kill "$tail_pid" 2>/dev/null || true
-              wait "$tail_pid" 2>/dev/null || true
               wait "$session_pid"
               exit $?
             fi
             sleep 1
           done
+          session_handed_off=1
+          trap - EXIT INT TERM
           kill "$tail_pid" 2>/dev/null || true
           wait "$tail_pid" 2>/dev/null || true
-          trap - EXIT
 
       # actions/upload-artifact v7.0.1, reviewed 2026-08-26.
       - name: Upload Session Deck Locator Artifact
@@ -257,19 +264,17 @@ jobs:
           session_log="$RUNNER_TEMP/session.log"
           tail -n +1 -F "$session_log" &
           tail_pid=$!
-          term() {
+          interrupt() {
             kill "$tail_pid" 2>/dev/null || true
-            if kill -0 "$session_pid" 2>/dev/null; then
-              kill -TERM -- "-$session_pid" 2>/dev/null || kill -TERM "$session_pid" 2>/dev/null || true
-            fi
-            while kill -0 "$session_pid" 2>/dev/null; do sleep 1; done
-            wait "$tail_pid" 2>/dev/null || true
+            scripts/reap-session.sh "$session_pid" 0 || true
+            exit 143
           }
-          trap term EXIT INT TERM
+          trap interrupt INT TERM
+          trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
           while kill -0 "$session_pid" 2>/dev/null; do
             sleep 1
           done
-          trap - EXIT INT TERM
+          trap - INT TERM EXIT
           kill "$tail_pid" 2>/dev/null || true
           wait "$tail_pid" 2>/dev/null || true
           exit "$(cat "$RUNNER_TEMP/session.exit")"
@@ -288,6 +293,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -f "$RUNNER_TEMP/session.pid" ]]; then
+            scripts/reap-session.sh "$(cat "$RUNNER_TEMP/session.pid")" 5 || true
+          fi
           rm -f -- \
             "$RUNNER_TEMP/cloudflared" \
             "$RUNNER_TEMP/cloudflared.log" \

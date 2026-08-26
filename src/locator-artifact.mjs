@@ -29,7 +29,9 @@ export async function uploadLocatorArtifact(path) {
     if (result.status !== 0) throw new Error("Locator Artifact upload failed.");
     return;
   }
-  if (!process.env.ACTIONS_RUNTIME_TOKEN) return;
+  if (!process.env.ACTIONS_RUNTIME_TOKEN) {
+    throw new Error("Locator Artifact upload failed.");
+  }
   const uploaded = import("@actions/artifact").then(async (mod) => {
     const Client = mod.DefaultArtifactClient;
     const client = typeof Client === "function" ? new Client() : mod.default;

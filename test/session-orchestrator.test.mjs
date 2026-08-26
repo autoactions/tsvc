@@ -60,9 +60,9 @@ test("RD-01 writes the Session Address only under ## Locators", () => {
   assert.match(source, /function locatorBlock[\s\S]*## Locators[\s\S]*Session Address: \$\{address\}/);
   assert.match(source, /console\.log\(locatorBlock\(sessionAddress\)/);
   const readyStart = source.indexOf("writeReadySummary(");
-  const upload = source.indexOf("await uploadLocatorArtifact", readyStart);
-  const wait = source.indexOf("await Promise.race", upload);
-  assert.ok(readyStart > 0 && readyStart < upload && upload < wait);
+  const write = source.indexOf("writeLocatorArtifact(", readyStart);
+  const wait = source.indexOf("await Promise.race", write);
+  assert.ok(readyStart > 0 && readyStart < write && write < wait);
 });
 
 test("RD-01 gates the Session Address and reduces a later failure Summary", async () => {

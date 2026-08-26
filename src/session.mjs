@@ -14,7 +14,7 @@ import {
 import http from "node:http";
 import { isAbsolute, resolve, sep } from "node:path";
 
-import { uploadLocatorArtifact, writeLocatorArtifact } from "./locator-artifact.mjs";
+import { writeLocatorArtifact } from "./locator-artifact.mjs";
 import { runSelectedService } from "./service-module.mjs";
 import { parseUploadDestinations } from "./upload-destinations.mjs";
 
@@ -254,18 +254,13 @@ async function runSession(options, shutdown) {
     if (!artifactDirectory || !isAbsolute(artifactDirectory)) {
       throw new FixedSessionError("startup", "Locator Artifact directory is invalid.");
     }
-    const artifactPath = writeLocatorArtifact({
+    writeLocatorArtifact({
       address: sessionAddress,
       sensitiveFacts: options.sensitiveFactsFile
         ? readSensitiveFactsBlock(options.sensitiveFactsFile)
         : undefined,
       directory: artifactDirectory,
     });
-    try {
-      await uploadLocatorArtifact(artifactPath);
-    } catch {
-      throw new FixedSessionError("startup", "Locator Artifact upload failed.");
-    }
     console.log("Session Ready.");
     console.log(locatorBlock(sessionAddress).trimEnd());
     if (options.sensitiveFactsFile) console.log(readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());

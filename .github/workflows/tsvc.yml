@@ -200,6 +200,7 @@ jobs:
               --database-ca-file "$RUNNER_TEMP/database-ca.pem"
             )
           fi
+          locator_file="$RUNNER_TEMP/session-deck-output.md"
           node src/session.mjs \
             --service "$INPUT_SERVICE" \
             --credential-file "$credential_file" \
@@ -207,7 +208,23 @@ jobs:
             --started-epoch-file "$RUNNER_TEMP/session-started-epoch" \
             "${sensitive_args[@]}" \
             "${upload_args[@]}" \
-            "${database_args[@]}"
+            "${database_args[@]}" &
+          session_pid=$!
+          trap 'kill "$session_pid" 2>/dev/null || true; wait "$session_pid" || true' EXIT
+          while [[ ! -f "$locator_file" ]]; do
+            if ! kill -0 "$session_pid" 2>/dev/null; then
+              trap - EXIT
+              wait "$session_pid"
+              exit $?
+            fi
+            sleep 1
+          done
+          if ! timeout 45s node scripts/upload-locator-artifact.mjs "$locator_file"; then
+            echo "Locator Artifact upload failed." >&2
+            exit 2
+          fi
+          trap - EXIT
+          wait "$session_pid"
 
       - name: Record pre-readiness failure
         if: ${{ failure() && steps.session.outcome != 'success' }}

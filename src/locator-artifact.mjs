@@ -30,10 +30,16 @@ export async function uploadLocatorArtifact(path) {
     return;
   }
   if (!process.env.ACTIONS_RUNTIME_TOKEN) return;
-  const { DefaultArtifactClient } = await import("@actions/artifact");
-  const client = new DefaultArtifactClient();
-  const result = await client.uploadArtifact(LOCATOR_ARTIFACT_NAME, [path], dirname(path), {
-    retentionDays: 1,
+  const uploaded = import("@actions/artifact").then(async (mod) => {
+    const Client = mod.DefaultArtifactClient;
+    const client = typeof Client === "function" ? new Client() : mod.default;
+    return client.uploadArtifact(LOCATOR_ARTIFACT_NAME, [path], dirname(path), {
+      retentionDays: 1,
+    });
   });
-  if (!result.id) throw new Error("Locator Artifact upload failed.");
+  const timeout = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("Locator Artifact upload timed out.")), 45_000);
+  });
+  const result = await Promise.race([uploaded, timeout]);
+  if (!result?.id) throw new Error("Locator Artifact upload failed.");
 }

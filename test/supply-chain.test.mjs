@@ -47,3 +47,15 @@ test("IM-03 OpenList AIO uses the reviewed immutable linux-amd64 image", () => {
   );
   assert.doesNotMatch(module, /openlistteam\/openlist:(?:aio|latest|latest-aio|beta-aio)/);
 });
+
+test("IM-04 Code Server uses the reviewed immutable linux-amd64 image", () => {
+  const module = readFileSync(
+    new URL("../src/service-module.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    module,
+    /lscr\.io\/linuxserver\/code-server@sha256:212d588e21815316d6525abe8d14bb0114fc2cf0499f08e9e34a1b514b1055b9/,
+  );
+  assert.doesNotMatch(module, /linuxserver\/code-server:(?:latest|alpine|nightly)/);
+});

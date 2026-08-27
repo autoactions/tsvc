@@ -21,6 +21,7 @@ import { parseRcloneMounts } from "./rclone-mounts.mjs";
 const SERVICE_ORIGINS = {
   chrome: "http://127.0.0.1:58080",
   openlist: "http://127.0.0.1:58082",
+  "code-server": "http://127.0.0.1:58084",
 };
 const METRICS_ORIGIN = "http://127.0.0.1:49312";
 const STARTUP_TIMEOUT_MS = process.env.NODE_TEST_CONTEXT && process.env.TSVC_TEST_STARTUP_TIMEOUT_MS
@@ -40,7 +41,7 @@ const ARGUMENT_NAMES = new Set([
   "sensitive-facts-file",
 ]);
 
-/** @typedef {"chrome" | "openlist"} Service */
+/** @typedef {"chrome" | "openlist" | "code-server"} Service */
 /**
  * @typedef {{
  *   service: Service,
@@ -111,7 +112,7 @@ function parseArguments(argv) {
   const databaseCaFile = values["database-ca-file"];
   const sensitiveFactsFile = values["sensitive-facts-file"];
   if (
-    (service !== "chrome" && service !== "openlist") ||
+    (service !== "chrome" && service !== "openlist" && service !== "code-server") ||
     !credentialFile || !cloudflared || !startedEpochFile ||
     ![credentialFile, cloudflared, startedEpochFile].every(isAbsolute)
   ) {

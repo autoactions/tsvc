@@ -365,17 +365,19 @@ test("WF-04 rejects incomplete or legacy OpenList database arguments", () => {
       assert.equal(result.status, 1);
       assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
     }
-    const chromeArguments = [...base];
-    chromeArguments[2] = "chrome";
-    const unsupported = spawnSync(process.execPath, [
-      ...chromeArguments,
-      "--database-file", join(root, "database.json"),
-      "--database-ca-file", join(root, "database-ca.pem"),
-    ], {
-      env: { ...process.env, GITHUB_STEP_SUMMARY: summary, RUNNER_TEMP: root },
-    });
-    assert.equal(unsupported.status, 1);
-    assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
+    for (const service of ["chrome", "code-server"]) {
+      const serviceArguments = [...base];
+      serviceArguments[2] = service;
+      const unsupported = spawnSync(process.execPath, [
+        ...serviceArguments,
+        "--database-file", join(root, "database.json"),
+        "--database-ca-file", join(root, "database-ca.pem"),
+      ], {
+        env: { ...process.env, GITHUB_STEP_SUMMARY: summary, RUNNER_TEMP: root },
+      });
+      assert.equal(unsupported.status, 1);
+      assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
+    }
   } finally {
     rmSync(root, { recursive: true });
   }

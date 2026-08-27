@@ -22,7 +22,7 @@ import { isSessionCredential } from "./session-credential.mjs";
 import { parseDatabase } from "./database.mjs";
 
 const ORIGIN_HOST = "127.0.0.1";
-const ORIGIN_PORTS = { chrome: 58080, openlist: 58082 };
+const ORIGIN_PORTS = { chrome: 58080, openlist: 58082, "code-server": 58084 };
 const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_COMMAND_OUTPUT = 64 * 1024;
 const MAX_JSON_RESPONSE = 1024 * 1024;
@@ -33,10 +33,12 @@ const CHROME_USERNAME = "admin";
 const OPENLIST_IMAGE =
   "openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb";
 const OPENLIST_USERNAME = "admin";
+const CODE_SERVER_IMAGE =
+  "lscr.io/linuxserver/code-server@sha256:212d588e21815316d6525abe8d14bb0114fc2cf0499f08e9e34a1b514b1055b9";
 const RCLONE_IMAGE =
   "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548";
 
-/** @typedef {"chrome" | "openlist"} Service */
+/** @typedef {"chrome" | "openlist" | "code-server"} Service */
 /** @typedef {"startup" | "runtime" | "cleanup"} FailurePhase */
 /** @typedef {{ phase: FailurePhase, summary: string }} ServiceFailure */
 /** @typedef {{ accessGuidance: string, username?: string }} ServiceReady */
@@ -203,7 +205,7 @@ async function runLifecycle(options, ready, finished) {
 
 /** @param {RunSelectedServiceOptions} options */
 function validateOptions(options) {
-  if (options.service !== "chrome" && options.service !== "openlist") {
+  if (options.service !== "chrome" && options.service !== "openlist" && options.service !== "code-server") {
     throw new FixedServiceError("startup", "Selected Service is invalid.");
   }
   if (!isAbsolute(options.credentialFile)) {
@@ -264,7 +266,7 @@ async function readCredential(service, path) {
     throw new FixedServiceError("startup", "Selected Service credential file is invalid.");
   }
   const value = await readFile(path, "utf8");
-  const valid = service === "chrome"
+  const valid = service === "chrome" || service === "code-server"
     ? isSessionCredential(value)
     : isSessionCredential(value) && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value);
   if (!valid) {
@@ -291,7 +293,11 @@ class OwnedResources {
     this.openlistPermissionContainer = `${this.container}-openlist-permissions`;
     this.openlistConfigurationContainer = `${this.container}-openlist-configuration`;
     this.openlistBootstrapContainer = `${this.container}-openlist-bootstrap`;
-    this.image = service === "chrome" ? CHROME_IMAGE : OPENLIST_IMAGE;
+    this.image = service === "chrome"
+      ? CHROME_IMAGE
+      : service === "code-server"
+        ? CODE_SERVER_IMAGE
+        : OPENLIST_IMAGE;
     const processes = /** @type {{ child: import("node:child_process").ChildProcess, mountPath: string }[]} */ ([]);
     this.rclone = rclone
       ? {
@@ -313,7 +319,9 @@ class OwnedResources {
     this.openlistConfigFile = service === "openlist" ? join(tempRoot, "openlist-config.json") : undefined;
     this.volumes = service === "chrome"
       ? [`temporary-session-chrome-config-${this.suffix}`]
-      : [`temporary-session-openlist-data-${this.suffix}`];
+      : service === "code-server"
+        ? [`temporary-session-code-server-config-${this.suffix}`]
+        : [`temporary-session-openlist-data-${this.suffix}`];
   }
 }
 
@@ -638,7 +646,9 @@ async function startRcloneMounts(resources, cancellation) {
 async function startAdapter(resources, cancellation) {
   const args = resources.service === "chrome"
     ? chromeDockerArgs(resources)
-    : openlistDockerArgs(resources);
+    : resources.service === "code-server"
+      ? codeServerDockerArgs(resources)
+      : openlistDockerArgs(resources);
   await runCommand("docker", args, 60_000, cancellation);
 }
 
@@ -669,7 +679,9 @@ function rcloneDockerMountArgs(resources) {
 
 /** @param {Service} service */
 function containerPort(service) {
-  return service === "chrome" ? 3000 : 5244;
+  if (service === "chrome") return 3000;
+  if (service === "code-server") return 8443;
+  return 5244;
 }
 
 /** @param {OwnedResources} resources */
@@ -679,6 +691,17 @@ function chromeDockerArgs(resources) {
     "--shm-size", "1g",
     "--env", "START_DOCKER=false",
     "--env", `CUSTOM_USER=${CHROME_USERNAME}`,
+    "--env", "FILE__PASSWORD=/run/secrets/session-credential",
+    "--mount", `type=volume,source=${resources.volumes[0]},target=/config`,
+    "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/session-credential,readonly`,
+    resources.image,
+  ];
+}
+
+/** @param {OwnedResources} resources */
+function codeServerDockerArgs(resources) {
+  return [
+    ...commonDockerArgs(resources),
     "--env", "FILE__PASSWORD=/run/secrets/session-credential",
     "--mount", `type=volume,source=${resources.volumes[0]},target=/config`,
     "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/session-credential,readonly`,
@@ -809,6 +832,13 @@ async function requiredHealth(service, credential, sessionAddress) {
       httpStatus(`${localBase}/`, { authorization }),
       httpStatus(`${sessionAddress}/`, { authorization }),
       websocketUpgrade(`${sessionAddress}/websocket`, { authorization }),
+    ]);
+    return;
+  }
+  if (service === "code-server") {
+    await Promise.all([
+      httpStatus(`${localBase}/`, {}),
+      httpStatus(`${sessionAddress}/`, {}),
     ]);
     return;
   }
@@ -1057,6 +1087,9 @@ function asServiceFailure(error, fallbackPhase) {
 function accessGuidance(service) {
   if (service === "chrome") {
     return `Use native Basic Auth with username \`${CHROME_USERNAME}\` and the Session Credential.`;
+  }
+  if (service === "code-server") {
+    return "Use the native code-server login with the Session Credential as the password.";
   }
   return `Use the native OpenList login with username \`${OPENLIST_USERNAME}\` and the Session Credential.`;
 }

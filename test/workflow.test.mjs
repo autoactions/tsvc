@@ -14,14 +14,14 @@ function stepScript(name, next) {
   return match[1].replace(/^ {10}/gm, "");
 }
 
-test("WF-01 exposes only Chrome and OpenList", () => {
-  assert.match(workflow, /options:\n\s+- chrome\n\s+- openlist/);
+test("WF-01 exposes only Chrome, OpenList, and Code Server", () => {
+  assert.match(workflow, /options:\n\s+- chrome\n\s+- openlist\n\s+- code-server/);
   assert.doesNotMatch(workflow, /58081|agalwood|operator-token/i);
 });
 
 test("WF-01 rejects invalid raw dispatch values before checkout", () => {
   const script = stepScript("Validate closed inputs", "Validate optional Rclone configuration");
-  for (const service of ["chrome", "openlist"]) {
+  for (const service of ["chrome", "openlist", "code-server"]) {
     assert.equal(spawnSync("bash", ["-c", script], {
       env: { ...process.env, INPUT_SERVICE: service },
     }).status, 0);
@@ -64,6 +64,7 @@ test("WF-04 requires the OpenList database pair", () => {
     },
   });
   assert.equal(validate("chrome", "false", "false").status, 0);
+  assert.equal(validate("code-server", "false", "false").status, 0);
   assert.equal(validate("openlist", "true", "true").status, 0);
   assert.equal(validate("openlist", "true", "false").status, 2);
   assert.equal(validate("openlist", "false", "true").status, 2);
@@ -77,13 +78,14 @@ test("WF-01 keeps immutable execution policy", () => {
   assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
   assert.match(workflow, /rclone\/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548/);
   assert.match(workflow, /openlistteam\/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb/);
+  assert.match(workflow, /lscr\.io\/linuxserver\/code-server@sha256:212d588e21815316d6525abe8d14bb0114fc2cf0499f08e9e34a1b514b1055b9/);
 });
 
-test("SC-01 uses the Session Credential for both public services", () => {
+test("SC-01 uses the Session Credential for public services", () => {
   const credential = workflow.match(
     /- name: Stage Session Credential\n([\s\S]*?)\n\s+- name: Stage Rclone configuration/,
   )?.[1] ?? "";
-  assert.match(credential, /inputs\.service == 'chrome' \|\| inputs\.service == 'openlist'/);
+  assert.match(credential, /inputs\.service == 'chrome' \|\| inputs\.service == 'openlist' \|\| inputs\.service == 'code-server'/);
   assert.match(credential, /secrets\.SESSION_PASSWORD/);
 });
 

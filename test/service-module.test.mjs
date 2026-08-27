@@ -11,12 +11,15 @@ import { runSelectedService } from "../src/service-module.mjs";
 const credential = "S".repeat(43);
 const chromeImage = "lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12";
 const openlistImage = "openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb";
+const codeServerImage = "lscr.io/linuxserver/code-server@sha256:212d588e21815316d6525abe8d14bb0114fc2cf0499f08e9e34a1b514b1055b9";
 
-/** @typedef {"chrome" | "openlist"} Service */
+/** @typedef {"chrome" | "openlist" | "code-server"} Service */
 
 /** @param {Service} service */
 function serviceOrigin(service) {
-  return `http://127.0.0.1:${service === "chrome" ? 58080 : 58082}`;
+  if (service === "chrome") return "http://127.0.0.1:58080";
+  if (service === "code-server") return "http://127.0.0.1:58084";
+  return "http://127.0.0.1:58082";
 }
 
 /** @param {Service} service @param {{ healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, offlineTools: string[], offlineToolsRequests: number, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
@@ -29,6 +32,10 @@ function startServiceServer(service, health) {
     }
     if (request.url === "/healthz") {
       response.writeHead(200).end('{"ok":true}');
+      return;
+    }
+    if (service === "code-server" && request.url === "/") {
+      response.writeHead(200).end("code-server");
       return;
     }
     if (service === "openlist" && request.url === "/") {
@@ -76,9 +83,10 @@ function startServiceServer(service, health) {
       socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
     }
   });
+  const port = service === "chrome" ? 58080 : service === "code-server" ? 58084 : 58082;
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(service === "chrome" ? 58080 : 58082, "127.0.0.1", () => resolve(server));
+    server.listen(port, "127.0.0.1", () => resolve(server));
   });
 }
 
@@ -195,11 +203,16 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
       return { commands, output, result, root, startupFailure: failure };
     }
     const ready = await serviceRun.ready;
-    assert.equal(ready.username, "admin");
-    assert.match(
-      ready.accessGuidance,
-      service === "chrome" ? /Session Credential/ : /OpenList.*admin.*Session Credential/,
-    );
+    if (service === "code-server") {
+      assert.equal(ready.username, undefined);
+      assert.match(ready.accessGuidance, /code-server.*Session Credential/);
+    } else {
+      assert.equal(ready.username, "admin");
+      assert.match(
+        ready.accessGuidance,
+        service === "chrome" ? /Session Credential/ : /OpenList.*admin.*Session Credential/,
+      );
+    }
     if (onReady) await onReady({ health, dockerLog, output });
     if (termination === "cancel") cancellation.abort();
     else if (termination === "exit") writeFileSync(`${dockerLog}.stopped`, "stopped");
@@ -258,8 +271,21 @@ test("AU-01 and IS-01 Chrome uses native file-backed authentication and one conf
   rmSync(root, { recursive: true });
 });
 
+test("AU-04 and IS-01 Code Server uses native file-backed authentication and one confined Origin", async () => {
+  const { commands, root } = await exerciseAdapter("code-server");
+  const run = commands.find((command) => command[0] === "run" && command.includes("--detach"));
+  assert.ok(run);
+  assert.ok(run.includes(codeServerImage));
+  assert.ok(run.includes("127.0.0.1:58084:8443"));
+  assert.equal(run.filter((/** @type {string} */ argument) => argument === "--publish").length, 1);
+  assert.ok(run.includes("FILE__PASSWORD=/run/secrets/session-credential"));
+  assert.doesNotMatch(JSON.stringify(commands), new RegExp(credential));
+  assert.doesNotMatch(JSON.stringify(run), /privileged|unconfined|docker\.sock/);
+  rmSync(root, { recursive: true });
+});
+
 test("SC-03 mounts configured Rclone paths into any selected Service", async () => {
-  for (const service of [/** @type {const} */ ("chrome"), /** @type {const} */ ("openlist")]) {
+  for (const service of [/** @type {const} */ ("chrome"), /** @type {const} */ ("openlist"), /** @type {const} */ ("code-server")]) {
     const { commands, result, root } = await exerciseAdapter(service, "cancel", undefined, { rclone: true });
     assert.deepEqual(result, { status: "success" });
     assert.ok(commands.some((command) => command[0] === "pull" && command.includes("rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548")));

@@ -11,6 +11,7 @@ on:
         options:
           - chrome
           - openlist
+          - code-server
 
 permissions: {}
 
@@ -31,7 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$INPUT_SERVICE" in
-            chrome|openlist) ;;
+            chrome|openlist|code-server) ;;
             *) echo "Invalid Service" >&2; exit 2 ;;
           esac
 
@@ -115,6 +116,7 @@ jobs:
           case "$INPUT_SERVICE" in
             chrome) printf '%s\n' 'Chrome: lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12' ;;
             openlist) printf '%s\n' 'OpenList AIO: openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb' ;;
+            code-server) printf '%s\n' 'Code Server: lscr.io/linuxserver/code-server@sha256:212d588e21815316d6525abe8d14bb0114fc2cf0499f08e9e34a1b514b1055b9' ;;
             *) exit 2 ;;
           esac
           if [[ "$RCLONE_CONFIGURED" == "true" ]]; then
@@ -136,7 +138,7 @@ jobs:
         run: node scripts/stage-database-ca.mjs "$RUNNER_TEMP/database-ca.pem"
 
       - name: Stage Session Credential
-        if: ${{ inputs.service == 'chrome' || inputs.service == 'openlist' }}
+        if: ${{ inputs.service == 'chrome' || inputs.service == 'openlist' || inputs.service == 'code-server' }}
         shell: bash
         env:
           SESSION_PASSWORD: ${{ secrets.SESSION_PASSWORD }}

@@ -12,9 +12,11 @@ const enabled = process.env.RUN_LIVE_ADAPTER_TESTS === "1";
 const openlistEnabled = enabled && Boolean(process.env.DATABASE && process.env.DATABASE_CA);
 const sessionCredential = "123456";
 
-/** @param {"chrome" | "openlist"} service */
+/** @param {"chrome" | "openlist" | "code-server"} service */
 function servicePort(service) {
-  return service === "chrome" ? 58080 : 58082;
+  if (service === "chrome") return 58080;
+  if (service === "code-server") return 58084;
+  return 58082;
 }
 
 /** @param {"chrome"} service @param {string} path @param {Record<string, string>} headers */
@@ -42,7 +44,7 @@ function websocketStatus(service, path, headers) {
   });
 }
 
-/** @param {"chrome" | "openlist"} service @param {string} credential @param {string[]} [additionalSensitiveValues] */
+/** @param {"chrome" | "openlist" | "code-server"} service @param {string} credential @param {string[]} [additionalSensitiveValues] */
 function assertLiveIsolation(service, credential, additionalSensitiveValues = []) {
   const ids = execFileSync("docker", ["ps", "--quiet", "--filter", `publish=${servicePort(service)}`], { encoding: "utf8" })
     .trim().split("\n").filter(Boolean);
@@ -58,7 +60,7 @@ function assertLiveIsolation(service, credential, additionalSensitiveValues = []
   assert.equal(Object.keys(metadata.HostConfig.PortBindings).length, 1);
   assert.deepEqual(
     Object.keys(metadata.HostConfig.PortBindings),
-    [service === "chrome" ? "3000/tcp" : "5244/tcp"],
+    [service === "chrome" ? "3000/tcp" : service === "code-server" ? "8443/tcp" : "5244/tcp"],
   );
   const logs = execFileSync("docker", ["logs", "--tail", "200", id], {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
@@ -70,7 +72,7 @@ function assertLiveIsolation(service, credential, additionalSensitiveValues = []
   }
 }
 
-/** @param {"chrome" | "openlist"} service */
+/** @param {"chrome" | "openlist" | "code-server"} service */
 async function withLiveService(service) {
   const root = mkdtempSync(join(tmpdir(), `live-${service}-`));
   const credentialFile = join(root, "session-credential");
@@ -148,6 +150,21 @@ test("AU-03 pinned OpenList authenticates with the current Session Credential", 
     assert.ok(Array.isArray(toolsPayload.data));
     assert.ok(toolsPayload.data.includes("aria2"));
     assert.ok(toolsPayload.data.includes("SimpleHttp"));
+  } finally {
+    live.cancellation.abort();
+    assert.deepEqual(await live.serviceRun.finished, { status: "success" });
+    rmSync(live.root, { recursive: true });
+    if (live.previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP;
+    else process.env.RUNNER_TEMP = live.previousRunnerTemp;
+  }
+});
+
+test("AU-04 pinned Code Server authenticates with the current Session Credential", { skip: !enabled, timeout: 300_000 }, async () => {
+  const live = await withLiveService("code-server");
+  try {
+    assertLiveIsolation("code-server", sessionCredential);
+    const response = await fetch("http://127.0.0.1:58084/");
+    assert.equal(response.status, 200);
   } finally {
     live.cancellation.abort();
     assert.deepEqual(await live.serviceRun.finished, { status: "success" });

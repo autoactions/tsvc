@@ -163,7 +163,7 @@ test("AU-04 pinned Code Server authenticates with the current Session Credential
   const live = await withLiveService("code-server");
   try {
     assertLiveIsolation("code-server", sessionCredential);
-    const response = await fetch("http://127.0.0.1:58084/");
+    const response = await fetch("http://127.0.0.1:58084/login");
     assert.equal(response.status, 200);
   } finally {
     live.cancellation.abort();

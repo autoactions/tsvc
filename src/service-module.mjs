@@ -837,8 +837,8 @@ async function requiredHealth(service, credential, sessionAddress) {
   }
   if (service === "code-server") {
     await Promise.all([
-      httpStatus(`${localBase}/`, {}),
-      httpStatus(`${sessionAddress}/`, {}),
+      httpStatus(`${localBase}/login`, {}),
+      httpStatus(`${sessionAddress}/login`, {}),
     ]);
     return;
   }

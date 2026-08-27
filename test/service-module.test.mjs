@@ -34,7 +34,7 @@ function startServiceServer(service, health) {
       response.writeHead(200).end('{"ok":true}');
       return;
     }
-    if (service === "code-server" && request.url === "/") {
+    if (service === "code-server" && (request.url === "/" || request.url === "/login")) {
       response.writeHead(200).end("code-server");
       return;
     }

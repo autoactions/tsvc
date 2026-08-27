@@ -209,6 +209,7 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
       return { commands, motrixCommands: health.commands, output, result, root, startupFailure: failure };
     }
     const ready = await serviceRun.ready;
+    assert.equal(ready.username, service === "motrix" ? undefined : "admin");
     assert.match(
       ready.accessGuidance,
       service === "chrome" ? /Session Credential/ : service === "motrix" ? /Motrix Operator Token/ : /OpenList.*admin.*Session Credential/,

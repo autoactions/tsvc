@@ -31,17 +31,19 @@ const MAX_TASK_RESPONSE = 1024 * 1024;
 
 const CHROME_IMAGE =
   "lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12";
+const CHROME_USERNAME = "admin";
 const MOTRIX_IMAGE =
   "ghcr.io/agalwood/motrix-server@sha256:d3ecb7e7233d25ca1e947a386ee7c885f8c61fbabf7af4754a65d9d7fbdefa6f";
 const OPENLIST_IMAGE =
   "openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb";
+const OPENLIST_USERNAME = "admin";
 const RCLONE_IMAGE =
   "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548";
 
 /** @typedef {"chrome" | "motrix" | "openlist"} Service */
 /** @typedef {"startup" | "runtime" | "cleanup"} FailurePhase */
 /** @typedef {{ phase: FailurePhase, summary: string }} ServiceFailure */
-/** @typedef {{ accessGuidance: string }} ServiceReady */
+/** @typedef {{ accessGuidance: string, username?: string }} ServiceReady */
 /** @typedef {{ status: "success" } | ServiceFailure} ServiceResult */
 /**
  * @typedef {{
@@ -180,7 +182,11 @@ async function runLifecycle(options, ready, finished) {
       }),
     ]);
     becameReady = true;
-    ready.resolve({ accessGuidance: accessGuidance(options.service) });
+    const username = operatorUsername(options.service);
+    ready.resolve({
+      accessGuidance: accessGuidance(options.service),
+      ...(username ? { username } : {}),
+    });
     if (resources.upload) uploader = new RcloneUploader(resources, credential, options.cancellation);
     await Promise.race([
       supervise(resources, credential, options.sessionAddress, options.cancellation, uploader),
@@ -858,7 +864,7 @@ function chromeDockerArgs(resources) {
     ...commonDockerArgs(resources),
     "--shm-size", "1g",
     "--env", "START_DOCKER=false",
-    "--env", "CUSTOM_USER=admin",
+    "--env", `CUSTOM_USER=${CHROME_USERNAME}`,
     "--env", "FILE__PASSWORD=/run/secrets/session-credential",
     "--mount", `type=volume,source=${resources.volumes[0]},target=/config`,
     "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/session-credential,readonly`,
@@ -1015,7 +1021,7 @@ async function queryMotrixTasks(credential) {
 async function requiredHealth(service, credential, sessionAddress) {
   const localBase = `http://${ORIGIN_HOST}:${originPort(service)}`;
   if (service === "chrome") {
-    const authorization = `Basic ${Buffer.from(`session:${credential}`).toString("base64")}`;
+    const authorization = `Basic ${Buffer.from(`${CHROME_USERNAME}:${credential}`).toString("base64")}`;
     await Promise.all([
       httpStatus(`${localBase}/`, { authorization }),
       httpStatus(`${sessionAddress}/`, { authorization }),
@@ -1041,7 +1047,7 @@ async function openlistLocalLogin(credential) {
     `http://${ORIGIN_HOST}:${originPort("openlist")}/api/auth/login`,
     {},
     "POST",
-    JSON.stringify({ username: "admin", password: credential }),
+    JSON.stringify({ username: OPENLIST_USERNAME, password: credential }),
   );
   if (
     !login || typeof login !== "object" ||
@@ -1253,10 +1259,17 @@ function asServiceFailure(error, fallbackPhase) {
 /** @param {Service} service */
 function accessGuidance(service) {
   if (service === "chrome") {
-    return "Use native Basic Auth with username `admin` and the Session Credential.";
+    return `Use native Basic Auth with username \`${CHROME_USERNAME}\` and the Session Credential.`;
   }
   if (service === "motrix") return "Use the native Motrix login with the Motrix Operator Token.";
-  return "Use the native OpenList login with username `admin` and the Session Credential.";
+  return `Use the native OpenList login with username \`${OPENLIST_USERNAME}\` and the Session Credential.`;
+}
+
+/** @param {Service} service @returns {string | undefined} */
+function operatorUsername(service) {
+  if (service === "chrome") return CHROME_USERNAME;
+  if (service === "openlist") return OPENLIST_USERNAME;
+  return undefined;
 }
 
 /** @param {number} milliseconds @param {AbortSignal} signal */

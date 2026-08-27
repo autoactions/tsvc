@@ -257,22 +257,21 @@ async function runSession(options, shutdown) {
     }
     clearTimeout(startupTimer);
     ready = true;
-    writeReadySummary(options, sessionAddress, serviceReady.accessGuidance);
+    writeReadySummary(options, sessionAddress, serviceReady);
     const artifactDirectory = process.env.GITHUB_WORKSPACE || process.env.RUNNER_TEMP;
     if (!artifactDirectory || !isAbsolute(artifactDirectory)) {
       throw new FixedSessionError("startup", "Locator Artifact directory is invalid.");
     }
-    const username = sessionUsername(options.service);
     writeLocatorArtifact({
       address: sessionAddress,
-      ...(username ? { username } : {}),
+      ...(serviceReady.username ? { username: serviceReady.username } : {}),
       ...(options.sensitiveFactsFile
         ? { sensitiveFacts: readSensitiveFactsBlock(options.sensitiveFactsFile) }
         : {}),
       directory: artifactDirectory,
     });
     console.log("Session Ready.");
-    console.log(locatorBlock(options.service, sessionAddress).trimEnd());
+    console.log(locatorBlock(sessionAddress, serviceReady.username).trimEnd());
     if (options.sensitiveFactsFile) console.log(readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());
 
     await Promise.race([
@@ -421,8 +420,8 @@ function metricsRequest(path) {
   });
 }
 
-/** @param {SessionOptions} options @param {string} address @param {string} guidance */
-function writeReadySummary(options, address, guidance) {
+/** @param {SessionOptions} options @param {string} address @param {{ accessGuidance: string, username?: string }} ready */
+function writeReadySummary(options, address, ready) {
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (!summary || !isAbsolute(summary)) throw new FixedSessionError("startup", "Job Summary path is invalid.");
   const startedEpoch = Number(readFileSync(options.startedEpochFile, "utf8").trim());
@@ -437,9 +436,9 @@ function writeReadySummary(options, address, guidance) {
     `- Service: ${options.service}`,
     `- Ready at: ${readinessTime.toISOString()}`,
     `- Expected expiry: ${expectedExpiry.toISOString()}`,
-    `- Access: ${guidance}`,
+    `- Access: ${ready.accessGuidance}`,
     "",
-    locatorBlock(options.service, address).trimEnd(),
+    locatorBlock(address, ready.username).trimEnd(),
   ];
   if (options.sensitiveFactsFile) lines.push("", readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());
   writeFileSync(summary, `${lines.join("\n")}\n`, { mode: 0o600 });
@@ -457,15 +456,9 @@ function readSensitiveFactsBlock(path) {
   return block;
 }
 
-/** @param {Service} service @returns {string | undefined} */
-function sessionUsername(service) {
-  return service === "motrix" ? undefined : "admin";
-}
-
-/** @param {Service} service @param {string} address */
-function locatorBlock(service, address) {
+/** @param {string} address @param {string | undefined} username */
+function locatorBlock(address, username) {
   const lines = ["## Locators", "", `- Session Address: ${address}`];
-  const username = sessionUsername(service);
   if (username) lines.push(`- Username: ${username}`);
   return [...lines, ""].join("\n");
 }

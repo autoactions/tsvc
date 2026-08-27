@@ -55,10 +55,10 @@ async function waitUntil(predicate, timeout = 15_000) {
 test("RD-01 writes the Session Address only under ## Locators", () => {
   const source = readFileSync(new URL("../src/session.mjs", import.meta.url), "utf8");
   const ready = source.slice(source.indexOf("function writeReadySummary"), source.indexOf("function locatorBlock"));
-  assert.match(ready, /locatorBlock\(options\.service, address\)/);
+  assert.match(ready, /locatorBlock\(address, ready\.username\)/);
   assert.doesNotMatch(ready, /`- Session Address:/);
   assert.match(source, /function locatorBlock[\s\S]*## Locators[\s\S]*Session Address: \$\{address\}/);
-  assert.match(source, /console\.log\(locatorBlock\(options\.service, sessionAddress\)/);
+  assert.match(source, /console\.log\(locatorBlock\(sessionAddress, serviceReady\.username\)/);
   const readyStart = source.indexOf("writeReadySummary(");
   const write = source.indexOf("writeLocatorArtifact(", readyStart);
   const wait = source.indexOf("await Promise.race", write);

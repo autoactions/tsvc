@@ -56,6 +56,10 @@ function assertLiveIsolation(service, credential, additionalSensitiveValues = []
   assert.deepEqual(metadata.HostConfig.CapAdd, null);
   assert.deepEqual(metadata.HostConfig.Devices, []);
   assert.equal(Object.keys(metadata.HostConfig.PortBindings).length, 1);
+  assert.deepEqual(
+    Object.keys(metadata.HostConfig.PortBindings),
+    [service === "chrome" ? "3000/tcp" : "5244/tcp"],
+  );
   const logs = execFileSync("docker", ["logs", "--tail", "200", id], {
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
   });
@@ -137,6 +141,13 @@ test("AU-03 pinned OpenList authenticates with the current Session Credential", 
     const payload = await response.json();
     assert.equal(payload.code, 200);
     assert.equal(typeof payload.data?.token, "string");
+    const toolsResponse = await fetch("http://127.0.0.1:58082/api/public/offline_download_tools");
+    assert.equal(toolsResponse.status, 200);
+    const toolsPayload = await toolsResponse.json();
+    assert.equal(toolsPayload.code, 200);
+    assert.ok(Array.isArray(toolsPayload.data));
+    assert.ok(toolsPayload.data.includes("aria2"));
+    assert.ok(toolsPayload.data.includes("SimpleHttp"));
   } finally {
     live.cancellation.abort();
     assert.deepEqual(await live.serviceRun.finished, { status: "success" });

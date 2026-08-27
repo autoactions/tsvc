@@ -226,6 +226,9 @@ async function exerciseOpenListStartupTimeout(localLoginHealthy) {
             .end('{"code":200,"data":{"token":"test-token"}}');
         } else response.writeHead(401).end('{"code":401}');
       });
+    } else if (request.method === "GET" && request.url === "/api/public/offline_download_tools") {
+      response.writeHead(200, { "content-type": "application/json" })
+        .end('{"code":200,"message":"success","data":["aria2","SimpleHttp"]}');
     } else response.writeHead(404).end();
   });
   const publicServer = createSecureServer(

@@ -345,7 +345,7 @@ async function prepareOpenList(resources, sessionAddress, cancellation) {
       https_port: -1,
       force_https: false,
     },
-    temp_dir: "/tmp/openlist-temp",
+    temp_dir: "/opt/openlist/data/temp",
     bleve_dir: "/tmp/openlist-bleve",
     log: { enable: false },
   };
@@ -693,7 +693,6 @@ function openlistDockerArgs(resources) {
   return [
     ...commonDockerArgs(resources),
     "--user", "1001:1001",
-    "--read-only",
     "--init",
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
@@ -735,6 +734,13 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
         continue;
       }
       try {
+        await openlistOfflineDownloadTools();
+      } catch {
+        openlistFailure = "offline-tools";
+        await abortableDelay(1_000, cancellation);
+        continue;
+      }
+      try {
         await httpStatus(`${sessionAddress}/`, {});
         console.log("Startup stage complete: Public access.");
         return;
@@ -754,7 +760,11 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
   if (resources.service === "openlist") {
     throw new FixedServiceError(
       "startup",
-      openlistFailure === "local" ? "Local OpenList login was not ready." : "Public access was not ready.",
+      openlistFailure === "local"
+        ? "Local OpenList login was not ready."
+        : openlistFailure === "offline-tools"
+          ? "OpenList offline download tools were not ready."
+          : "Public access was not ready.",
     );
   }
   throw new FixedServiceError("startup", "Session startup was cancelled.");
@@ -804,6 +814,7 @@ async function requiredHealth(service, credential, sessionAddress) {
   }
   if (service === "openlist") {
     await openlistLocalLogin(credential);
+    await openlistOfflineDownloadTools();
     await httpStatus(`${sessionAddress}/`, {});
     return;
   }
@@ -823,6 +834,20 @@ async function openlistLocalLogin(credential) {
     /** @type {Record<string, unknown>} */ (login).code !== 200 ||
     !/** @type {{ data?: { token?: unknown } }} */ (login).data ||
     typeof /** @type {{ data: { token?: unknown } }} */ (login).data.token !== "string"
+  ) throw new Error("unhealthy");
+}
+
+async function openlistOfflineDownloadTools() {
+  const response = await httpJson(
+    `http://${ORIGIN_HOST}:${originPort("openlist")}/api/public/offline_download_tools`,
+    {},
+  );
+  const tools = response && typeof response === "object"
+    ? /** @type {{ code?: unknown, data?: unknown }} */ (response)
+    : undefined;
+  if (
+    tools?.code !== 200 || !Array.isArray(tools.data) ||
+    !tools.data.includes("aria2") || !tools.data.includes("SimpleHttp")
   ) throw new Error("unhealthy");
 }
 
@@ -848,14 +873,14 @@ function httpStatus(url, headers, method = "GET", body) {
   });
 }
 
-/** @param {string} url @param {Record<string, string>} headers @param {string} method @param {string} body @param {AbortSignal} [signal] */
-function httpJson(url, headers, method, body, signal) {
+/** @param {string} url @param {Record<string, string>} headers @param {string} [method] @param {string} [body] @param {AbortSignal} [signal] */
+function httpJson(url, headers, method = "GET", body, signal) {
   /** @type {Promise<unknown>} */
   return new Promise((resolvePromise, rejectPromise) => {
     const parsed = new URL(url);
     const transport = parsed.protocol === "https:" ? https : http;
     const request = transport.request(parsed, {
-      headers: {
+      headers: body === undefined ? headers : {
         ...headers,
         "content-length": String(Buffer.byteLength(body)),
         "content-type": "application/json",
@@ -892,7 +917,7 @@ function httpJson(url, headers, method, body, signal) {
       if (signal.aborted) cancel();
       else signal.addEventListener("abort", cancel, { once: true });
     }
-    request.write(body);
+    if (body !== undefined) request.write(body);
     request.end();
   });
 }

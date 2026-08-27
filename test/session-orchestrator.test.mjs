@@ -181,229 +181,6 @@ test("RD-01 gates the Session Address and reduces a later failure Summary", asyn
   }
 });
 
-test("UP-02 starts Motrix uploads when public validation is challenged", async () => {
-  const root = mkdtempSync(join(tmpdir(), "session-upload-failure-"));
-  const bin = join(root, "bin");
-  const credentialFile = join(root, "session-credential");
-  const summary = join(root, "summary");
-  const dockerLog = join(root, "docker.log");
-  const cloudflaredArguments = join(root, "cloudflared-arguments");
-  const started = join(root, "started");
-  const rcloneConfig = join(root, "rclone.conf");
-  const rcloneDestinations = join(root, "rclone-destinations.json");
-  const cloudflared = join(root, "cloudflared");
-  const key = join(root, "key.pem");
-  const certificate = join(root, "certificate.pem");
-  mkdirSync(bin);
-  writeFileSync(credentialFile, credential, { mode: 0o600 });
-  writeFileSync(started, `${Math.floor(Date.now() / 1000)}\n`);
-  writeFileSync(rcloneConfig, "[archive]\ntype = memory\n", { mode: 0o600 });
-  writeFileSync(rcloneDestinations, '[{"id":"drive","destination":"archive:motrix"}]', { mode: 0o600 });
-  writeFileSync(`${dockerLog}.rclone-failures`, "10");
-  const openssl = spawnSync("openssl", [
-    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-    "-subj", "/CN=session-test.trycloudflare.com",
-    "-addext", "subjectAltName=DNS:session-test.trycloudflare.com",
-    "-keyout", key, "-out", certificate,
-  ]);
-  assert.equal(openssl.status, 0, openssl.stderr.toString());
-  const docker = new URL("./fixtures/fake-docker", import.meta.url).pathname;
-  copyFileSync(new URL("./fixtures/fake-cloudflared", import.meta.url).pathname, cloudflared);
-  chmodSync(docker, 0o755);
-  chmodSync(cloudflared, 0o755);
-  symlinkSync(docker, join(bin, "docker"));
-
-  const bearer = `Bearer ${credential}`;
-  const motrixHandler = (
-    /** @type {import("node:http").IncomingMessage} */ request,
-    /** @type {import("node:http").ServerResponse} */ response,
-  ) => {
-    if (request.url === "/healthz") response.writeHead(200).end('{"ok":true}');
-    else if (
-      request.method === "POST" && request.url === "/rpc/query/query%3AlistTasks" &&
-      request.headers.authorization === bearer
-    ) {
-      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify([{
-        id: "failed-task",
-        status: "completed",
-        transitionPhase: "idle",
-        finalPath: "/downloads/drive/file.bin",
-      }]));
-    } else response.writeHead(401).end();
-  };
-  const motrixUpgrade = (
-    /** @type {import("node:http").IncomingMessage} */ request,
-    /** @type {import("node:stream").Duplex} */ socket,
-  ) => {
-    if (request.url === "/rpc/events" && request.headers.authorization === bearer) {
-      socket.end("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n");
-    } else socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-  };
-  const local = createServer(motrixHandler);
-  local.on("upgrade", motrixUpgrade);
-  local.on("connection", (socket) => { socket.on("error", () => {}); });
-  const publicServer = createSecureServer(
-    { key: readFileSync(key), cert: readFileSync(certificate) },
-    (_request, response) => {
-      response.writeHead(403, { "cf-mitigated": "challenge" }).end("challenge");
-    },
-  );
-  await listen(local, 58081);
-  await listen(publicServer, 0);
-  const address = publicServer.address();
-  assert.ok(address && typeof address === "object");
-
-  const child = spawn(process.execPath, [
-    new URL("../src/session.mjs", import.meta.url).pathname,
-    "--service", "motrix",
-    "--credential-file", credentialFile,
-    "--cloudflared", cloudflared,
-    "--started-epoch-file", started,
-    "--rclone-config-file", rcloneConfig,
-    "--rclone-destinations-file", rcloneDestinations,
-  ], {
-    env: {
-      ...process.env,
-      FAKE_DOCKER_LOG: dockerLog,
-      FAKE_CLOUDFLARED_ARGUMENTS: cloudflaredArguments,
-      FAKE_SESSION_ADDRESS: `https://session-test.trycloudflare.com:${address.port}`,
-      GITHUB_STEP_SUMMARY: summary,
-      NODE_OPTIONS: `--require=${new URL("./fixtures/force-localhost.cjs", import.meta.url).pathname}`,
-      NODE_TLS_REJECT_UNAUTHORIZED: "0",
-      PATH: `${bin}:${process.env.PATH}`,
-      RUNNER_TEMP: root,
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { output += chunk; });
-
-  try {
-    await waitUntil(() => /Rclone upload failed \(item 1, destination drive, attempt 1, category unknown, exit 1\); retry scheduled/.test(output) || child.exitCode !== null);
-    assert.equal(child.exitCode, null, output);
-    assert.deepEqual(JSON.parse(readFileSync(cloudflaredArguments, "utf8")), [
-      "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:49312",
-      "--url", "http://127.0.0.1:58081",
-    ]);
-    child.kill("SIGTERM");
-    const exitCode = await new Promise((resolve) => child.once("exit", resolve));
-    assert.equal(exitCode, 1, output);
-    const failureSummary = readFileSync(summary, "utf8");
-    assert.match(failureSummary, /Motrix upload or task cleanup remained incomplete\./);
-    assert.doesNotMatch(failureSummary, /https?:\/\//);
-  } finally {
-    if (child.exitCode === null) child.kill("SIGKILL");
-    await close(local);
-    await close(publicServer);
-    rmSync(root, { recursive: true });
-  }
-});
-
-test("RD-01 publishes no Session Address when Tunnel startup fails", async () => {
-  const root = mkdtempSync(join(tmpdir(), "session-orchestrator-failure-"));
-  const credentialFile = join(root, "session-credential");
-  const summary = join(root, "summary");
-  const started = join(root, "started");
-  const cloudflared = join(root, "cloudflared");
-  const rcloneConfig = join(root, "rclone.conf");
-  const rcloneDestinations = join(root, "rclone-destinations.json");
-  writeFileSync(credentialFile, credential, { mode: 0o600 });
-  writeFileSync(started, `${Math.floor(Date.now() / 1000)}\n`);
-  writeFileSync(rcloneConfig, "[archive]\ntype = memory\n", { mode: 0o600 });
-  writeFileSync(rcloneDestinations, '[{"id":"drive","destination":"archive:motrix"}]', { mode: 0o600 });
-  copyFileSync(new URL("./fixtures/fake-cloudflared", import.meta.url).pathname, cloudflared);
-  chmodSync(cloudflared, 0o755);
-
-  const result = spawnSync(process.execPath, [
-    new URL("../src/session.mjs", import.meta.url).pathname,
-    "--service", "motrix",
-    "--credential-file", credentialFile,
-    "--cloudflared", cloudflared,
-    "--started-epoch-file", started,
-    "--rclone-config-file", rcloneConfig,
-    "--rclone-destinations-file", rcloneDestinations,
-  ], {
-    env: {
-      ...process.env,
-      FAKE_SESSION_ADDRESS: "https://not-a-quick-tunnel.example",
-      FAKE_LOG_BYTES: String(35 * 1024 * 1024),
-      GITHUB_STEP_SUMMARY: summary,
-      RUNNER_TEMP: root,
-    },
-  });
-
-  try {
-    assert.equal(result.status, 1, result.stdout.toString());
-    const failureSummary = readFileSync(summary, "utf8");
-    assert.match(failureSummary, /Phase: startup/);
-    assert.doesNotMatch(failureSummary, /https?:\/\//);
-    assert.doesNotMatch(`${result.stdout}${result.stderr}${failureSummary}`, new RegExp(credential));
-    assert.throws(() => readFileSync(credentialFile), { code: "ENOENT" });
-    assert.throws(() => readFileSync(rcloneConfig), { code: "ENOENT" });
-    assert.throws(() => readFileSync(rcloneDestinations), { code: "ENOENT" });
-    const boundedLogs = readdirSync(root).filter((name) => name.startsWith("cloudflared.log"));
-    assert.equal(boundedLogs.length, 3);
-    for (const name of boundedLogs) {
-      assert.ok(statSync(join(root, name)).size <= 10 * 1024 * 1024);
-      assert.doesNotMatch(readFileSync(join(root, name), "utf8"), new RegExp(credential));
-    }
-  } finally {
-    rmSync(root, { recursive: true });
-  }
-});
-
-test("FL-01 preserves a selected-Service startup diagnostic", () => {
-  const root = mkdtempSync(join(tmpdir(), "session-orchestrator-service-failure-"));
-  const bin = join(root, "bin");
-  const credentialFile = join(root, "session-credential");
-  const summary = join(root, "summary");
-  const dockerLog = join(root, "docker.log");
-  const started = join(root, "started");
-  const cloudflared = join(root, "cloudflared");
-  const rcloneConfig = join(root, "rclone.conf");
-  const rcloneDestinations = join(root, "rclone-destinations.json");
-  mkdirSync(bin);
-  writeFileSync(credentialFile, credential, { mode: 0o600 });
-  writeFileSync(started, `${Math.floor(Date.now() / 1000)}\n`);
-  writeFileSync(rcloneConfig, "[archive]\ntype = memory\n", { mode: 0o600 });
-  writeFileSync(rcloneDestinations, '[{"id":"drive","destination":"missing:motrix"}]', { mode: 0o600 });
-  const docker = new URL("./fixtures/fake-docker", import.meta.url).pathname;
-  copyFileSync(new URL("./fixtures/fake-cloudflared", import.meta.url).pathname, cloudflared);
-  chmodSync(docker, 0o755);
-  chmodSync(cloudflared, 0o755);
-  symlinkSync(docker, join(bin, "docker"));
-
-  const result = spawnSync(process.execPath, [
-    new URL("../src/session.mjs", import.meta.url).pathname,
-    "--service", "motrix",
-    "--credential-file", credentialFile,
-    "--cloudflared", cloudflared,
-    "--started-epoch-file", started,
-    "--rclone-config-file", rcloneConfig,
-    "--rclone-destinations-file", rcloneDestinations,
-  ], {
-    env: {
-      ...process.env,
-      FAKE_DOCKER_LOG: dockerLog,
-      FAKE_SESSION_ADDRESS: "session-test.trycloudflare.com",
-      GITHUB_STEP_SUMMARY: summary,
-      PATH: `${bin}:${process.env.PATH}`,
-      RUNNER_TEMP: root,
-    },
-  });
-
-  try {
-    const output = `${result.stdout}${result.stderr}`;
-    assert.equal(result.status, 1, output);
-    assert.match(output, /Rclone Destination remote is not configured\./);
-    assert.doesNotMatch(output, /^Session failed\.$/m);
-    assert.match(readFileSync(summary, "utf8"), /Diagnostic: Rclone Destination remote is not configured\./);
-  } finally {
-    rmSync(root, { recursive: true });
-  }
-});
-
 /** @param {boolean} localLoginHealthy */
 async function exerciseOpenListStartupTimeout(localLoginHealthy) {
   const root = mkdtempSync(join(tmpdir(), "session-orchestrator-openlist-timeout-"));
@@ -525,30 +302,27 @@ test("FL-01 startup timeout reports a Quick Tunnel that never becomes ready", as
   assert.doesNotMatch(observable, new RegExp(`${credential}|database_secret_value`));
 });
 
-test("WF-03 rejects a Motrix Session without its required upload configuration", () => {
+test("WF-03 requires paired generic Rclone arguments", () => {
   const root = mkdtempSync(join(tmpdir(), "session-orchestrator-rclone-arguments-"));
-  const credentialFile = join(root, "session-credential");
-  const started = join(root, "started");
-  const cloudflared = join(root, "cloudflared");
   const summary = join(root, "summary");
-  writeFileSync(credentialFile, credential, { mode: 0o600 });
-  writeFileSync(started, `${Math.floor(Date.now() / 1000)}\n`);
-  copyFileSync(new URL("./fixtures/fake-cloudflared", import.meta.url).pathname, cloudflared);
-  chmodSync(cloudflared, 0o755);
-
-  const result = spawnSync(process.execPath, [
+  const base = [
     new URL("../src/session.mjs", import.meta.url).pathname,
-    "--service", "motrix",
-    "--credential-file", credentialFile,
-    "--cloudflared", cloudflared,
-    "--started-epoch-file", started,
-  ], {
-    env: { ...process.env, GITHUB_STEP_SUMMARY: summary, RUNNER_TEMP: root },
-  });
-
+    "--service", "chrome",
+    "--credential-file", join(root, "session-credential"),
+    "--cloudflared", join(root, "cloudflared"),
+    "--started-epoch-file", join(root, "started"),
+  ];
   try {
-    assert.equal(result.status, 1);
-    assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
+    for (const extra of [
+      ["--rclone-config-file", join(root, "rclone.conf")],
+      ["--rclone-mounts-file", join(root, "rclone-mounts")],
+    ]) {
+      const result = spawnSync(process.execPath, [...base, ...extra], {
+        env: { ...process.env, GITHUB_STEP_SUMMARY: summary, RUNNER_TEMP: root },
+      });
+      assert.equal(result.status, 1);
+      assert.match(readFileSync(summary, "utf8"), /Session arguments are invalid\./);
+    }
   } finally {
     rmSync(root, { recursive: true });
   }

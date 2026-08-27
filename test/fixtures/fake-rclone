@@ -1,0 +1,26 @@
+#!/usr/bin/env node
+
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+if (args.includes("listremotes")) {
+  const config = args[args.indexOf("--config") + 1];
+  for (const match of readFileSync(config, "utf8").matchAll(/^\[([^\]\r\n]+)\]\s*$/gmu)) {
+    process.stdout.write(`${match[1]}:\n`);
+  }
+} else if (args.includes("mount")) {
+  const mount = args[args.indexOf("mount") + 2];
+  const marker = `${mount}.mounted`;
+  writeFileSync(marker, "mounted");
+  const finish = () => {
+    if (existsSync(marker)) unlinkSync(marker);
+    process.exit(0);
+  };
+  process.on("SIGTERM", finish);
+  process.on("SIGINT", finish);
+  setInterval(() => {
+    if (existsSync(`${process.env.FAKE_DOCKER_LOG}.rclone-stop`)) process.exit(1);
+  }, 25);
+} else {
+  process.exitCode = 2;
+}

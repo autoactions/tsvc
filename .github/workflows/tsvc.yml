@@ -10,7 +10,6 @@ on:
         type: choice
         options:
           - chrome
-          - motrix
           - openlist
 
 permissions: {}
@@ -32,56 +31,43 @@ jobs:
         run: |
           set -euo pipefail
           case "$INPUT_SERVICE" in
-            chrome|motrix|openlist) ;;
+            chrome|openlist) ;;
             *) echo "Invalid Service" >&2; exit 2 ;;
           esac
 
-      - name: Validate Motrix upload configuration
+      - name: Validate optional Rclone configuration
         env:
-          INPUT_SERVICE: ${{ inputs.service }}
           RCLONE_CONFIG_CONFIGURED: ${{ secrets.RCLONE_CONFIG != '' }}
-          RCLONE_DESTINATIONS: ${{ vars.RCLONE_DESTINATIONS }}
+          RCLONE_MOUNTS: ${{ vars.RCLONE_MOUNTS }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$INPUT_SERVICE" != "motrix" ]]; then
-            exit 0
-          fi
-          if [[ "$RCLONE_CONFIG_CONFIGURED" != "true" || -z "$RCLONE_DESTINATIONS" ]]; then
-            echo "Incomplete Motrix upload configuration" >&2
+          if [[ "$RCLONE_CONFIG_CONFIGURED" == "true" && -z "$RCLONE_MOUNTS" ]] || \
+             [[ "$RCLONE_CONFIG_CONFIGURED" != "true" && -n "$RCLONE_MOUNTS" ]]; then
+            echo "Incomplete Rclone configuration" >&2
             exit 2
           fi
-          node -e '
-            const fs = require("node:fs");
-            const [source, output] = process.argv.slice(1);
-            try {
-              const entries = JSON.parse(source);
-              if (!Array.isArray(entries) || entries.length === 0) throw new Error();
+          if [[ -n "$RCLONE_MOUNTS" ]]; then
+            node -e '
+              const source = process.argv[1];
               const ids = new Set();
-              for (const entry of entries) {
+              const lines = source.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+              if (lines.length === 0) process.exit(2);
+              for (const line of lines) {
+                const separator = line.indexOf("=");
+                const id = line.slice(0, separator).trim();
+                const remoteSource = line.slice(separator + 1).trim();
+                const remoteSeparator = remoteSource.indexOf(":");
+                const remote = remoteSource.slice(0, remoteSeparator);
                 if (
-                  !entry || typeof entry !== "object" || Array.isArray(entry) ||
-                  Object.keys(entry).some((key) => key !== "id" && key !== "destination") ||
-                  typeof entry.id !== "string" ||
-                  !/^[a-z0-9][a-z0-9-]{0,62}$/.test(entry.id) || ids.has(entry.id) ||
-                  typeof entry.destination !== "string"
-                ) throw new Error();
-                const separator = entry.destination.indexOf(":");
-                const remote = entry.destination.slice(0, separator);
-                if (
-                  separator < 1 || !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(remote) ||
-                  /[\u0000-\u001f\u007f]/.test(entry.destination)
-                ) throw new Error();
-                ids.add(entry.id);
+                  separator < 1 || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(id) || ids.has(id) ||
+                  remoteSeparator < 1 || !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(remote) ||
+                  /[\u0000-\u001f\u007f]/.test(remoteSource)
+                ) process.exit(2);
+                ids.add(id);
               }
-              const descriptor = fs.openSync(output, "wx", 0o600);
-              try { fs.writeFileSync(descriptor, JSON.stringify(entries)); }
-              finally { fs.closeSync(descriptor); }
-            } catch {
-              process.stderr.write("Invalid Rclone Destinations\n");
-              process.exitCode = 2;
-            }
-          ' "$RCLONE_DESTINATIONS" "$RUNNER_TEMP/rclone-destinations.json"
+            ' "$RCLONE_MOUNTS" || { echo "Invalid Rclone Mounts" >&2; exit 2; }
+          fi
 
       - name: Validate database configuration
         env:
@@ -121,6 +107,7 @@ jobs:
         shell: bash
         env:
           INPUT_SERVICE: ${{ inputs.service }}
+          RCLONE_CONFIGURED: ${{ vars.RCLONE_MOUNTS != '' }}
         run: |
           set -euo pipefail
           printf 'Runner image: %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
@@ -128,13 +115,12 @@ jobs:
           "$RUNNER_TEMP/cloudflared" --version
           case "$INPUT_SERVICE" in
             chrome) printf '%s\n' 'Chrome: lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12' ;;
-            motrix)
-              printf '%s\n' 'Motrix: ghcr.io/agalwood/motrix-server@sha256:d3ecb7e7233d25ca1e947a386ee7c885f8c61fbabf7af4754a65d9d7fbdefa6f'
-              printf '%s\n' 'Rclone: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548'
-              ;;
             openlist) printf '%s\n' 'OpenList AIO: openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb' ;;
             *) exit 2 ;;
           esac
+          if [[ "$RCLONE_CONFIGURED" == "true" ]]; then
+            printf '%s\n' 'Rclone: rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548'
+          fi
 
       - name: Stage database configuration
         if: ${{ inputs.service == 'openlist' }}
@@ -157,19 +143,30 @@ jobs:
           SESSION_PASSWORD: ${{ secrets.SESSION_PASSWORD }}
         run: node scripts/stage-credential.mjs "$RUNNER_TEMP/session-credential" "$RUNNER_TEMP/sensitive-facts"
 
-      - name: Stage Motrix Operator Token
-        if: ${{ inputs.service == 'motrix' }}
-        shell: bash
-        env:
-          SESSION_PASSWORD: ${{ secrets.SESSION_PASSWORD }}
-        run: node scripts/stage-motrix-operator-token.mjs "$RUNNER_TEMP/motrix-operator-token" "$RUNNER_TEMP/sensitive-facts"
-
       - name: Stage Rclone configuration
-        if: ${{ inputs.service == 'motrix' }}
+        if: ${{ vars.RCLONE_MOUNTS != '' }}
         shell: bash
         env:
           RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
         run: node scripts/stage-rclone-config.mjs "$RUNNER_TEMP/rclone.conf"
+
+      - name: Stage Rclone mounts
+        if: ${{ vars.RCLONE_MOUNTS != '' }}
+        shell: bash
+        env:
+          RCLONE_MOUNTS: ${{ vars.RCLONE_MOUNTS }}
+        run: node scripts/stage-rclone-mounts.mjs "$RUNNER_TEMP/rclone-mounts"
+
+      - name: Prepare FUSE for Rclone mounts
+        if: ${{ vars.RCLONE_MOUNTS != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -c /dev/fuse ]]
+          command -v fusermount3 >/dev/null
+          if ! grep -qx 'user_allow_other' /etc/fuse.conf; then
+            printf '%s\n' 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null
+          fi
 
       - name: Start Session
         id: session
@@ -178,15 +175,14 @@ jobs:
           INPUT_SERVICE: ${{ inputs.service }}
         run: |
           set -euo pipefail
-          upload_args=()
+          rclone_args=()
           database_args=()
           credential_file="$RUNNER_TEMP/session-credential"
           sensitive_args=(--sensitive-facts-file "$RUNNER_TEMP/sensitive-facts")
-          if [[ "$INPUT_SERVICE" == "motrix" ]]; then
-            credential_file="$RUNNER_TEMP/motrix-operator-token"
-            upload_args+=(
+          if [[ -f "$RUNNER_TEMP/rclone-mounts" ]]; then
+            rclone_args+=(
               --rclone-config-file "$RUNNER_TEMP/rclone.conf"
-              --rclone-destinations-file "$RUNNER_TEMP/rclone-destinations.json"
+              --rclone-mounts-file "$RUNNER_TEMP/rclone-mounts"
             )
           fi
           if [[ "$INPUT_SERVICE" == "openlist" ]]; then
@@ -217,7 +213,7 @@ jobs:
             --cloudflared "$RUNNER_TEMP/cloudflared" \
             --started-epoch-file "$RUNNER_TEMP/session-started-epoch" \
             "${sensitive_args[@]}" \
-            "${upload_args[@]}" \
+            "${rclone_args[@]}" \
             "${database_args[@]}" \
             >> "$session_log" 2>&1 < /dev/null &
           session_pid=$!
@@ -301,10 +297,9 @@ jobs:
             "$RUNNER_TEMP/cloudflared.log.1" \
             "$RUNNER_TEMP/cloudflared.log.2" \
             "$RUNNER_TEMP/rclone.conf" \
-            "$RUNNER_TEMP/rclone-destinations.json" \
+            "$RUNNER_TEMP/rclone-mounts" \
             "$RUNNER_TEMP/session-started-epoch" \
             "$RUNNER_TEMP/session-credential" \
-            "$RUNNER_TEMP/motrix-operator-token" \
             "$RUNNER_TEMP/sensitive-facts" \
             "$RUNNER_TEMP/database.json" \
             "$RUNNER_TEMP/database-ca.pem" \

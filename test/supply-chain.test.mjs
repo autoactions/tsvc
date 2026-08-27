@@ -23,7 +23,7 @@ test("IM-01 cloudflared acquisition verifies the exact immutable artifact", () =
   assert.doesNotMatch(script, /latest|apt-get|sudo/);
 });
 
-test("IM-02 the Motrix upload helper uses the reviewed immutable rclone image", () => {
+test("IM-02 the mount foundation uses the reviewed immutable rclone image", () => {
   const module = readFileSync(
     new URL("../src/service-module.mjs", import.meta.url),
     "utf8",

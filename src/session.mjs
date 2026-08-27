@@ -16,11 +16,10 @@ import { isAbsolute, resolve, sep } from "node:path";
 
 import { writeLocatorArtifact } from "./locator-artifact.mjs";
 import { runSelectedService } from "./service-module.mjs";
-import { parseUploadDestinations } from "./upload-destinations.mjs";
+import { parseRcloneMounts } from "./rclone-mounts.mjs";
 
 const SERVICE_ORIGINS = {
   chrome: "http://127.0.0.1:58080",
-  motrix: "http://127.0.0.1:58081",
   openlist: "http://127.0.0.1:58082",
 };
 const METRICS_ORIGIN = "http://127.0.0.1:49312";
@@ -35,20 +34,20 @@ const ARGUMENT_NAMES = new Set([
   "cloudflared",
   "started-epoch-file",
   "rclone-config-file",
-  "rclone-destinations-file",
+  "rclone-mounts-file",
   "database-file",
   "database-ca-file",
   "sensitive-facts-file",
 ]);
 
-/** @typedef {"chrome" | "motrix" | "openlist"} Service */
+/** @typedef {"chrome" | "openlist"} Service */
 /**
  * @typedef {{
  *   service: Service,
  *   credentialFile: string,
  *   cloudflared: string,
  *   startedEpochFile: string,
- *   upload?: { rcloneConfigFile: string, destinationsFile: string },
+ *   rclone?: { configFile: string, mountsFile: string },
  *   database?: { file: string, caFile: string },
  *   sensitiveFactsFile?: string,
  * }} SessionOptions
@@ -107,12 +106,12 @@ function parseArguments(argv) {
   const cloudflared = values.cloudflared;
   const startedEpochFile = values["started-epoch-file"];
   const rcloneConfigFile = values["rclone-config-file"];
-  const rcloneDestinationsFile = values["rclone-destinations-file"];
+  const rcloneMountsFile = values["rclone-mounts-file"];
   const databaseFile = values["database-file"];
   const databaseCaFile = values["database-ca-file"];
   const sensitiveFactsFile = values["sensitive-facts-file"];
   if (
-    (service !== "chrome" && service !== "motrix" && service !== "openlist") ||
+    (service !== "chrome" && service !== "openlist") ||
     !credentialFile || !cloudflared || !startedEpochFile ||
     ![credentialFile, cloudflared, startedEpochFile].every(isAbsolute)
   ) {
@@ -122,10 +121,9 @@ function parseArguments(argv) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
   if (
-    (service === "motrix" && (!rcloneConfigFile || !rcloneDestinationsFile)) ||
-    (service !== "motrix" && (rcloneConfigFile || rcloneDestinationsFile)) ||
+    Boolean(rcloneConfigFile) !== Boolean(rcloneMountsFile) ||
     (rcloneConfigFile && !isAbsolute(rcloneConfigFile)) ||
-    (rcloneDestinationsFile && !isAbsolute(rcloneDestinationsFile))
+    (rcloneMountsFile && !isAbsolute(rcloneMountsFile))
   ) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
@@ -137,15 +135,15 @@ function parseArguments(argv) {
   ) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
-  const upload = rcloneConfigFile && rcloneDestinationsFile
-    ? { rcloneConfigFile, destinationsFile: rcloneDestinationsFile }
+  const rclone = rcloneConfigFile && rcloneMountsFile
+    ? { configFile: rcloneConfigFile, mountsFile: rcloneMountsFile }
     : undefined;
   const database = databaseFile && databaseCaFile
     ? { file: databaseFile, caFile: databaseCaFile }
     : undefined;
   return {
     service, credentialFile, cloudflared, startedEpochFile,
-    ...(upload ? { upload } : {}),
+    ...(rclone ? { rclone } : {}),
     ...(database ? { database } : {}),
     ...(sensitiveFactsFile ? { sensitiveFactsFile } : {}),
   };
@@ -158,7 +156,7 @@ function validateRunnerTemporaryPaths(options) {
     throw new FixedSessionError("startup", "Runner temporary storage is invalid.");
   }
   const paths = [options.credentialFile, options.cloudflared, options.startedEpochFile];
-  if (options.upload) paths.push(options.upload.rcloneConfigFile, options.upload.destinationsFile);
+  if (options.rclone) paths.push(options.rclone.configFile, options.rclone.mountsFile);
   if (options.database) paths.push(options.database.file, options.database.caFile);
   if (options.sensitiveFactsFile) paths.push(options.sensitiveFactsFile);
   for (const path of paths) {
@@ -168,7 +166,7 @@ function validateRunnerTemporaryPaths(options) {
       throw new FixedSessionError("startup", "A Session runtime path is invalid.");
     }
     if (
-      options.upload && (path === options.upload.rcloneConfigFile || path === options.upload.destinationsFile) &&
+      options.rclone && (path === options.rclone.configFile || path === options.rclone.mountsFile) &&
       (!metadata.isFile() || (metadata.mode & 0o077) !== 0)
     ) {
       throw new FixedSessionError("startup", "Rclone configuration file is invalid.");
@@ -188,21 +186,19 @@ function validateRunnerTemporaryPaths(options) {
 /** @param {SessionOptions} options @param {AbortController} shutdown */
 async function runSession(options, shutdown) {
   validateRunnerTemporaryPaths(options);
-  let upload;
-  if (options.upload) {
+  let rclone;
+  if (options.rclone) {
     try {
-      upload = {
-        rcloneConfigFile: options.upload.rcloneConfigFile,
-        destinations: parseUploadDestinations(readFileSync(options.upload.destinationsFile, "utf8")),
+      rclone = {
+        configFile: options.rclone.configFile,
+        mounts: parseRcloneMounts(readFileSync(options.rclone.mountsFile, "utf8")),
       };
     } catch {
-      throw new FixedSessionError("startup", "Rclone destinations file is invalid.");
+      throw new FixedSessionError("startup", "Rclone mounts file is invalid.");
     }
   }
   console.log(`Starting Session: ${options.service}.`);
-  console.log(options.service === "motrix"
-    ? "Runtime artifacts are pinned; Motrix public access is not a startup gate."
-    : "Runtime artifacts are pinned; public validation remains separately gated.");
+  console.log("Runtime artifacts are pinned; public validation remains separately gated.");
 
   const log = new BoundedLog(`${process.env.RUNNER_TEMP}/cloudflared.log`);
   const origin = SERVICE_ORIGINS[options.service];
@@ -238,7 +234,7 @@ async function runSession(options, shutdown) {
       sessionAddress,
       credentialFile: options.credentialFile,
       cancellation: serviceCancellation,
-      ...(upload ? { upload } : {}),
+      ...(rclone ? { rclone } : {}),
       ...(options.database ? { database: options.database } : {}),
     });
     const serviceReadyPromise = serviceRun.ready;
@@ -295,13 +291,13 @@ async function runSession(options, shutdown) {
         console.error("Selected Service credential cleanup was incomplete.");
       }
     }
-    if (options.upload) {
-      for (const path of [options.upload.rcloneConfigFile, options.upload.destinationsFile]) {
+    if (options.rclone) {
+      for (const path of [options.rclone.configFile, options.rclone.mountsFile]) {
         try {
           unlinkSync(path);
         } catch (error) {
           if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
-            console.error("Rclone upload configuration cleanup was incomplete.");
+            console.error("Rclone configuration cleanup was incomplete.");
           }
         }
       }

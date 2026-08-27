@@ -19,28 +19,24 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
 import { isSessionCredential } from "./session-credential.mjs";
-import { isMotrixOperatorToken } from "./motrix-operator-token.mjs";
 import { parseDatabase } from "./database.mjs";
-import { isRcloneDestination, MOTRIX_DOWNLOADS_ROOT } from "./upload-destinations.mjs";
 
 const ORIGIN_HOST = "127.0.0.1";
-const ORIGIN_PORTS = { chrome: 58080, motrix: 58081, openlist: 58082 };
+const ORIGIN_PORTS = { chrome: 58080, openlist: 58082 };
 const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_COMMAND_OUTPUT = 64 * 1024;
-const MAX_TASK_RESPONSE = 1024 * 1024;
+const MAX_JSON_RESPONSE = 1024 * 1024;
 
 const CHROME_IMAGE =
   "lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12";
 const CHROME_USERNAME = "admin";
-const MOTRIX_IMAGE =
-  "ghcr.io/agalwood/motrix-server@sha256:d3ecb7e7233d25ca1e947a386ee7c885f8c61fbabf7af4754a65d9d7fbdefa6f";
 const OPENLIST_IMAGE =
   "openlistteam/openlist@sha256:b4de1e8e07de352a57e8f9eefbe5525c4a6eeef0ae4c74c2a1e68cb71d185fdb";
 const OPENLIST_USERNAME = "admin";
 const RCLONE_IMAGE =
   "rclone/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548";
 
-/** @typedef {"chrome" | "motrix" | "openlist"} Service */
+/** @typedef {"chrome" | "openlist"} Service */
 /** @typedef {"startup" | "runtime" | "cleanup"} FailurePhase */
 /** @typedef {{ phase: FailurePhase, summary: string }} ServiceFailure */
 /** @typedef {{ accessGuidance: string, username?: string }} ServiceReady */
@@ -51,9 +47,9 @@ const RCLONE_IMAGE =
  *   sessionAddress: string,
  *   credentialFile: string,
  *   cancellation: AbortSignal,
- *   upload?: {
- *     rcloneConfigFile: string,
- *     destinations: { id: string, localRoot: string, destination: string }[],
+ *   rclone?: {
+ *     configFile: string,
+ *     mounts: { id: string, source: string, remote: string }[],
  *   },
  *   database?: { file: string, caFile: string },
  * }} RunSelectedServiceOptions
@@ -124,14 +120,11 @@ async function runLifecycle(options, ready, finished) {
   let ownedDatabaseFile;
   /** @type {string | undefined} */
   let ownedDatabaseCaFile;
-  /** @type {RcloneUploader | undefined} */
-  let uploader;
-
   try {
     validateOptions(options);
     const locations = await validateTemporaryLocations(
       options.credentialFile,
-      options.upload?.rcloneConfigFile,
+      options.rclone?.configFile,
       options.database?.file,
       options.database?.caFile,
     );
@@ -148,26 +141,26 @@ async function runLifecycle(options, ready, finished) {
       locations.credentialFile,
       locations.runnerTemp,
       options.cancellation,
-      options.upload && locations.rcloneConfigFile
-        ? { rcloneConfigFile: locations.rcloneConfigFile, destinations: options.upload.destinations }
+      options.rclone && locations.rcloneConfigFile
+        ? { configFile: locations.rcloneConfigFile, mounts: options.rclone.mounts }
         : undefined,
       database,
     );
     await runCommand("docker", ["pull", resources.image], 10 * 60_000, options.cancellation);
     console.log("Startup stage complete: Service image.");
-    if (options.service === "motrix") {
-      await prepareMotrixOperatorToken(resources, options.cancellation);
-    }
-    if (resources.upload) {
+    if (resources.rclone) {
       await runCommand("docker", ["pull", RCLONE_IMAGE], 10 * 60_000, options.cancellation);
+      await extractRclone(resources, options.cancellation);
       await validateRcloneConfiguration(resources, options.cancellation);
+      await startRcloneMounts(resources, options.cancellation);
+      console.log("Startup stage complete: Rclone mounts.");
     }
     await assertFreeSpace("startup");
     if (options.service === "openlist") {
       await prepareOpenList(resources, options.sessionAddress, options.cancellation);
       console.log("Startup stage complete: OpenList database bootstrap.");
     }
-    await startAdapter(resources, options.sessionAddress, options.cancellation);
+    await startAdapter(resources, options.cancellation);
     console.log("Startup stage complete: Service container.");
     const container = resources.container;
     const containerExit = waitForContainerExit(container);
@@ -175,9 +168,6 @@ async function runLifecycle(options, ready, finished) {
       waitForReadiness(resources, credential, options.sessionAddress, options.cancellation),
       containerExit.then(async () => {
         if (options.cancellation.aborted) return new Promise(() => {});
-        if (options.service === "motrix") {
-          await reportMotrixStartupExit(container, credential);
-        }
         throw new FixedServiceError("startup", "Selected Service exited during startup.");
       }),
     ]);
@@ -187,9 +177,8 @@ async function runLifecycle(options, ready, finished) {
       accessGuidance: accessGuidance(options.service),
       ...(username ? { username } : {}),
     });
-    if (resources.upload) uploader = new RcloneUploader(resources, credential, options.cancellation);
     await Promise.race([
-      supervise(resources, credential, options.sessionAddress, options.cancellation, uploader),
+      supervise(resources, credential, options.sessionAddress, options.cancellation),
       containerExit.then(() => {
         if (options.cancellation.aborted) return new Promise(() => {});
         throw new FixedServiceError("runtime", "Selected Service exited.");
@@ -199,10 +188,6 @@ async function runLifecycle(options, ready, finished) {
     failure = asServiceFailure(error, becameReady ? "runtime" : "startup");
     if (!becameReady) ready.reject(failure);
   } finally {
-    await uploader?.stop();
-    if (uploader?.hasUnresolvedFailures() && !failure) {
-      failure = { phase: "runtime", summary: "Motrix upload or task cleanup remained incomplete." };
-    }
     const cleanupFailed = await cleanup(resources, [
       ownedCredentialFile,
       ownedRcloneConfigFile,
@@ -218,21 +203,19 @@ async function runLifecycle(options, ready, finished) {
 
 /** @param {RunSelectedServiceOptions} options */
 function validateOptions(options) {
-  if (options.service !== "chrome" && options.service !== "motrix" && options.service !== "openlist") {
+  if (options.service !== "chrome" && options.service !== "openlist") {
     throw new FixedServiceError("startup", "Selected Service is invalid.");
   }
   if (!isAbsolute(options.credentialFile)) {
     throw new FixedServiceError("startup", "Selected Service credential file is invalid.");
   }
   if (
-    (options.service === "motrix" && !options.upload) ||
-    (options.service !== "motrix" && options.upload) ||
-    (options.upload && (
-      !isAbsolute(options.upload.rcloneConfigFile) ||
-      !validUploadDestinations(options.upload.destinations)
-    ))
+    options.rclone && (
+      !isAbsolute(options.rclone.configFile) ||
+      !validRcloneMounts(options.rclone.mounts)
+    )
   ) {
-    throw new FixedServiceError("startup", "Selected Service upload configuration is invalid.");
+    throw new FixedServiceError("startup", "Rclone configuration is invalid.");
   }
   if (
     (options.service === "openlist" && !options.database) ||
@@ -256,17 +239,18 @@ function originPort(service) {
   return ORIGIN_PORTS[service];
 }
 
-/** @param {unknown} destinations */
-function validUploadDestinations(destinations) {
-  if (!Array.isArray(destinations) || destinations.length === 0) return false;
+/** @param {unknown} mounts */
+function validRcloneMounts(mounts) {
+  if (!Array.isArray(mounts) || mounts.length === 0) return false;
   const ids = new Set();
-  return destinations.every((entry) => {
+  return mounts.every((entry) => {
     if (!entry || typeof entry !== "object") return false;
     const value = /** @type {Record<string, unknown>} */ (entry);
     if (
       typeof value.id !== "string" || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(value.id) ||
-      ids.has(value.id) || value.localRoot !== join(MOTRIX_DOWNLOADS_ROOT, value.id) ||
-      !isRcloneDestination(value.destination)
+      ids.has(value.id) || typeof value.source !== "string" || typeof value.remote !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(value.remote) ||
+      !value.source.startsWith(`${value.remote}:`) || /[\u0000-\u001f\u007f]/u.test(value.source)
     ) return false;
     ids.add(value.id);
     return true;
@@ -282,9 +266,7 @@ async function readCredential(service, path) {
   const value = await readFile(path, "utf8");
   const valid = service === "chrome"
     ? isSessionCredential(value)
-    : service === "openlist"
-      ? isSessionCredential(value) && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)
-      : isMotrixOperatorToken(value);
+    : isSessionCredential(value) && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value);
   if (!valid) {
     throw new FixedServiceError("startup", "Selected Service credential file is invalid.");
   }
@@ -296,25 +278,30 @@ class OwnedResources {
    * @param {Service} service
    * @param {string} credentialFile
    * @param {string} tempRoot
-   * @param {{ rcloneConfigFile: string, destinations: { id: string, localRoot: string, destination: string }[] } | undefined} upload
+   * @param {{ configFile: string, mounts: { id: string, source: string, remote: string }[] } | undefined} rclone
    * @param {{ connection: { host: string, port: number, user: string, password: string }, caFile: string } | undefined} database
    */
-  constructor(service, credentialFile, tempRoot, upload, database) {
+  constructor(service, credentialFile, tempRoot, rclone, database) {
     this.service = service;
     this.credentialFile = credentialFile;
     this.tempRoot = tempRoot;
     this.suffix = `${process.pid}-${randomBytes(6).toString("hex")}`;
     this.container = `temporary-session-${service}-${this.suffix}`;
-    this.tokenPreparationContainer = `${this.container}-token-permissions`;
+    this.rcloneExtractionContainer = `${this.container}-rclone-extraction`;
     this.openlistPermissionContainer = `${this.container}-openlist-permissions`;
     this.openlistConfigurationContainer = `${this.container}-openlist-configuration`;
     this.openlistBootstrapContainer = `${this.container}-openlist-bootstrap`;
-    this.image = service === "chrome" ? CHROME_IMAGE : service === "motrix" ? MOTRIX_IMAGE : OPENLIST_IMAGE;
-    this.upload = upload
+    this.image = service === "chrome" ? CHROME_IMAGE : OPENLIST_IMAGE;
+    const processes = /** @type {{ child: import("node:child_process").ChildProcess, mountPath: string }[]} */ ([]);
+    this.rclone = rclone
       ? {
-          ...upload,
+          ...rclone,
           configDirectory: join(tempRoot, "rclone-config"),
           privateConfigFile: join(tempRoot, "rclone-config", "rclone.conf"),
+          binary: join(tempRoot, "rclone"),
+          mountRoot: join(tempRoot, "rclone-mounts"),
+          cacheRoot: join(tempRoot, "rclone-cache"),
+          processes,
         }
       : undefined;
     this.database = database
@@ -326,34 +313,8 @@ class OwnedResources {
     this.openlistConfigFile = service === "openlist" ? join(tempRoot, "openlist-config.json") : undefined;
     this.volumes = service === "chrome"
       ? [`temporary-session-chrome-config-${this.suffix}`]
-      : service === "motrix" ? [
-          `temporary-session-motrix-data-${this.suffix}`,
-          `temporary-session-motrix-downloads-${this.suffix}`,
-        ] : [`temporary-session-openlist-data-${this.suffix}`];
+      : [`temporary-session-openlist-data-${this.suffix}`];
   }
-}
-
-/** @param {OwnedResources} resources @param {AbortSignal} cancellation */
-async function prepareMotrixOperatorToken(resources, cancellation) {
-  await runCommand("docker", [
-    "run", "--rm",
-    "--name", resources.tokenPreparationContainer,
-    "--user", "0:0",
-    "--network", "none",
-    "--read-only",
-    "--cap-drop", "ALL",
-    "--cap-add", "CHOWN",
-    "--security-opt", "no-new-privileges",
-    "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/motrix-operator-token`,
-    "--entrypoint", "/bin/sh",
-    resources.image,
-    "-c",
-    'chown 1000:1000 "$1" && [ "$(stat -c \'%u:%g:%a\' "$1")" = "1000:1000:600" ]',
-    "--",
-    "/run/secrets/motrix-operator-token",
-  ], 60_000, cancellation).catch(() => {
-    throw new FixedServiceError("startup", "Motrix Operator Token permission setup failed.");
-  });
 }
 
 /** @param {OwnedResources} resources @param {string} sessionAddress @param {AbortSignal} cancellation */
@@ -549,20 +510,25 @@ async function readDatabaseConfiguration(databaseFile, databaseCaFile) {
  * @param {string} credentialFile
  * @param {string} runnerTemp
  * @param {AbortSignal} cancellation
- * @param {{ rcloneConfigFile: string, destinations: { id: string, localRoot: string, destination: string }[] } | undefined} upload
+ * @param {{ configFile: string, mounts: { id: string, source: string, remote: string }[] } | undefined} rclone
  * @param {{ connection: { host: string, port: number, user: string, password: string }, caFile: string } | undefined} database
  */
-async function createOwnedResources(service, credentialFile, runnerTemp, cancellation, upload, database) {
+async function createOwnedResources(service, credentialFile, runnerTemp, cancellation, rclone, database) {
   const tempRoot = await mkdtemp(join(runnerTemp, "temporary-session-"));
   await chmod(tempRoot, 0o700);
-  const resources = new OwnedResources(service, credentialFile, tempRoot, upload, database);
+  const resources = new OwnedResources(service, credentialFile, tempRoot, rclone, database);
   /** @type {string[]} */
   const createdVolumes = [];
   try {
-    if (resources.upload) {
-      await mkdir(resources.upload.configDirectory, { mode: 0o700 });
-      await copyFile(resources.upload.rcloneConfigFile, resources.upload.privateConfigFile);
-      await chmod(resources.upload.privateConfigFile, 0o600);
+    if (resources.rclone) {
+      await mkdir(resources.rclone.configDirectory, { mode: 0o700 });
+      await mkdir(resources.rclone.mountRoot, { mode: 0o700 });
+      await mkdir(resources.rclone.cacheRoot, { mode: 0o700 });
+      await copyFile(resources.rclone.configFile, resources.rclone.privateConfigFile);
+      await chmod(resources.rclone.privateConfigFile, 0o600);
+      for (const mount of resources.rclone.mounts) {
+        await mkdir(join(resources.rclone.mountRoot, mount.id), { mode: 0o700 });
+      }
     }
     if (resources.database) {
       await copyFile(resources.database.caFile, resources.database.privateCaFile);
@@ -587,254 +553,92 @@ function within(child, parent) {
   return child === parent || child.startsWith(`${parent}${sep}`);
 }
 
-/** @param {OwnedResources} resources */
-function commonRcloneDockerArgs(resources) {
-  if (!resources.upload) throw new Error("missing upload configuration");
-  const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
-  const gid = typeof process.getgid === "function" ? process.getgid() : 1000;
-  return [
-    "run", "--rm",
-    "--user", `${uid}:${gid}`,
-    "--read-only",
-    "--cap-drop", "ALL",
-    "--security-opt", "no-new-privileges",
-    "--network", "bridge",
-    "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-    "--mount", `type=bind,source=${resources.upload.configDirectory},target=/config/rclone`,
-  ];
-}
-
 /** @param {OwnedResources} resources @param {AbortSignal} cancellation */
 async function validateRcloneConfiguration(resources, cancellation) {
-  if (!resources.upload) return;
-  const output = await runCommand("docker", [
-    ...commonRcloneDockerArgs(resources),
-    "--name", `${resources.container}-rclone-config-check`,
-    RCLONE_IMAGE,
-    "--config", "/config/rclone/rclone.conf",
+  if (!resources.rclone) return;
+  const output = await runCommand(resources.rclone.binary, [
+    "--config", resources.rclone.privateConfigFile,
     "listremotes",
   ], 60_000, cancellation).catch(() => {
     throw new FixedServiceError("startup", "Rclone configuration validation failed.");
   });
   const configured = new Set(output.split(/\r?\n/));
-  const remotes = resources.upload.destinations.map(({ destination }) =>
-    destination.slice(0, destination.indexOf(":"))
-  );
+  const remotes = resources.rclone.mounts.map(({ remote }) => remote);
   if (remotes.some((remote) => !configured.has(`${remote}:`))) {
-    throw new FixedServiceError("startup", "Rclone Destination remote is not configured.");
+    throw new FixedServiceError("startup", "Rclone mount remote is not configured.");
   }
 }
 
-class RcloneUploader {
-  /** @param {OwnedResources} resources @param {string} credential @param {AbortSignal} cancellation */
-  constructor(resources, credential, cancellation) {
-    this.resources = resources;
-    this.credential = credential;
-    this.controller = new AbortController();
-    this.signal = AbortSignal.any([cancellation, this.controller.signal]);
-    /** @type {{ item: number, taskId: string, source: string, destination: string, destinationId: string, isBt: boolean, phase: "upload" | "stop-seeding" | "remove", failures: number, availableAt: number }[]} */
-    this.queue = [];
-    this.queued = new Set();
-    this.completed = new Set();
-    this.failed = new Set();
-    this.nextItem = 1;
-    /** @type {Promise<void> | undefined} */
-    this.worker = undefined;
-  }
-
-  /** @param {unknown[]} tasks */
-  observe(tasks) {
-    const upload = this.resources.upload;
-    if (!upload) return;
-    for (const task of tasks) {
-      const candidate = uploadCandidate(task, upload.destinations);
-      if (!candidate || this.queued.has(candidate.taskId) || this.completed.has(candidate.taskId)) continue;
-      this.queued.add(candidate.taskId);
-      const entry = {
-        ...candidate,
-        item: this.nextItem++,
-        phase: /** @type {const} */ ("upload"),
-        failures: 0,
-        availableAt: Date.now(),
-      };
-      this.queue.push(entry);
-      console.log(`Rclone upload queued (item ${entry.item}, destination ${entry.destinationId}).`);
-    }
-    if (this.queue.length > 0 && !this.worker) {
-      this.worker = this.run().finally(() => { this.worker = undefined; });
-    }
-  }
-
-  async run() {
-    while (!this.signal.aborted && this.queue.length > 0) {
-      const now = Date.now();
-      const index = this.queue.findIndex((entry) => entry.availableAt <= now);
-      if (index < 0) {
-        const next = Math.min(...this.queue.map((entry) => entry.availableAt));
-        await abortableDelay(Math.min(1_000, Math.max(1, next - now)), this.signal);
-        continue;
-      }
-      const [entry] = this.queue.splice(index, 1);
-      if (!entry) continue;
-      try {
-        if (entry.phase === "upload") {
-          await uploadWithRclone(this.resources, entry.source, entry.destination, this.signal);
-          entry.phase = entry.isBt ? "stop-seeding" : "remove";
-          entry.failures = 0;
-          console.log(`Rclone upload completed (item ${entry.item}, destination ${entry.destinationId}).`);
-        }
-        if (entry.phase === "stop-seeding") {
-          await invokeMotrixCommand("command:stopSeedingTask", [entry.taskId], this.credential, this.signal);
-          entry.phase = "remove";
-          entry.failures = 0;
-        }
-        await invokeMotrixCommand(
-          "command:removeTask",
-          [{ taskId: entry.taskId, deleteWithFiles: true }],
-          this.credential,
-          this.signal,
-        );
-        this.queued.delete(entry.taskId);
-        this.failed.delete(entry.taskId);
-        this.completed.add(entry.taskId);
-        console.log(`Motrix task cleanup completed (item ${entry.item}).`);
-      } catch (error) {
-        if (this.signal.aborted) break;
-        entry.failures += 1;
-        this.failed.add(entry.taskId);
-        if (entry.phase === "upload") {
-          const failure = classifyRcloneFailure(error);
-          const exit = failure.exitCode === undefined ? "unavailable" : String(failure.exitCode);
-          const prefix = `Rclone upload failed (item ${entry.item}, destination ${entry.destinationId}, attempt ${entry.failures}, category ${failure.category}, exit ${exit})`;
-          if (failure.permanent) {
-            console.log(`${prefix}; no retry scheduled.`);
-            continue;
-          }
-          const delay = retryDelay(entry.failures);
-          entry.availableAt = Date.now() + delay;
-          this.queue.push(entry);
-          console.log(`${prefix}; retry scheduled in ${Math.max(1, Math.ceil(delay / 1_000))}s.`);
-          continue;
-        }
-        const delay = retryDelay(entry.failures);
-        entry.availableAt = Date.now() + delay;
-        this.queue.push(entry);
-        console.log(`Motrix task cleanup failed (item ${entry.item}, attempt ${entry.failures}); retry scheduled in ${Math.max(1, Math.ceil(delay / 1_000))}s.`);
-      }
-    }
-  }
-
-  async stop() {
-    this.controller.abort();
-    await this.worker?.catch(() => undefined);
-  }
-
-  hasUnresolvedFailures() {
-    return this.failed.size > 0;
-  }
-}
-
-/** @param {number} failures */
-function retryDelay(failures) {
-  const ceiling = Math.min(60_000, 1_000 * (2 ** Math.min(failures - 1, 6)));
-  return Math.max(1, Math.round(ceiling * (0.5 + (Math.random() * 0.5))));
-}
-
-/**
- * @param {unknown} error
- * @returns {{ category: "temporary" | "auth" | "permission" | "quota" | "path-conflict" | "source-missing" | "fatal" | "unknown", exitCode: number | undefined, permanent: boolean }}
- */
-function classifyRcloneFailure(error) {
-  const exitCode = error instanceof CommandExecutionError && typeof error.exitCode === "number"
-    ? error.exitCode
-    : undefined;
-  const output = error instanceof CommandExecutionError ? error.output.toLowerCase() : "";
-  /** @type {"temporary" | "auth" | "permission" | "quota" | "path-conflict" | "source-missing" | "fatal" | "unknown"} */
-  let category;
-  if (/\b429\b|too many requests|rate.?limit|throttl/.test(output)) category = "temporary";
-  else if (/\b408\b|\b423\b|\b5\d\d\b|timed? out|timeout|connection reset|temporar|try again/.test(output)) category = "temporary";
-  else if (/\b401\b|unauthori[sz]ed|invalid_grant|token[^\n]*(?:expired|invalid)/.test(output)) category = "auth";
-  else if (/\b403\b|forbidden|permission denied|access denied/.test(output)) category = "permission";
-  else if (/\b507\b|quota|insufficient storage|storage limit/.test(output)) category = "quota";
-  else if (/\b409\b|case.?insensitive|invalid (?:file)?name|name[^\n]*invalid|already exists|conflict/.test(output)) category = "path-conflict";
-  else if (/no such file|not found|directory not found/.test(output)) category = "source-missing";
-  else if (exitCode === 5) category = "temporary";
-  else if (exitCode === 3 || exitCode === 4) category = "source-missing";
-  else if (exitCode === 8) category = "quota";
-  else if ([2, 6, 7].includes(exitCode ?? -1)) category = "fatal";
-  else category = "unknown";
-  return {
-    category,
-    exitCode,
-    permanent: ["auth", "permission", "quota", "path-conflict", "source-missing", "fatal"].includes(category),
-  };
-}
-
-/** @param {unknown} task @param {{ id: string, localRoot: string, destination: string }[]} destinations */
-function uploadCandidate(task, destinations) {
-  if (!task || typeof task !== "object") return undefined;
-  const value = /** @type {Record<string, unknown>} */ (task);
-  if (
-    typeof value.id !== "string" ||
-    !["seeding", "completed"].includes(String(value.status)) ||
-    value.transitionPhase !== "idle" ||
-    typeof value.finalPath !== "string"
-  ) return undefined;
-  const source = resolve(value.finalPath);
-  const target = destinations.find(({ localRoot }) => within(source, resolve(localRoot)));
-  if (!target) return undefined;
-  const localRoot = resolve(target.localRoot);
-  if (source === localRoot) return undefined;
-  const relative = source.slice(localRoot.length + 1).split(sep).join("/");
-  if (!relative || relative.startsWith("../") || relative.includes("/../")) return undefined;
-  const prefix = target.destination.endsWith(":")
-    ? target.destination
-    : `${target.destination.replace(/\/+$/, "")}/`;
-  return {
-    taskId: value.id,
-    source,
-    destination: `${prefix}${relative}`,
-    destinationId: target.id,
-    isBt: value.type === "bt" || value.type === "magnet" || value.kind === "bt" || value.status === "seeding",
-  };
-}
-
-/** @param {string} channel @param {unknown[]} args @param {string} credential @param {AbortSignal} cancellation */
-async function invokeMotrixCommand(channel, args, credential, cancellation) {
-  await httpJson(
-    `http://${ORIGIN_HOST}:${originPort("motrix")}/rpc/command/${encodeURIComponent(channel)}`,
-    { authorization: `Bearer ${credential}` },
-    "POST",
-    JSON.stringify({ args }),
-    cancellation,
-  );
-}
-
-/** @param {OwnedResources} resources @param {string} source @param {string} destination @param {AbortSignal} cancellation */
-async function uploadWithRclone(resources, source, destination, cancellation) {
+/** @param {OwnedResources} resources @param {AbortSignal} cancellation */
+async function extractRclone(resources, cancellation) {
+  if (!resources.rclone) return;
   await runCommand("docker", [
-    ...commonRcloneDockerArgs(resources),
-    "--name", `${resources.container}-rclone-upload`,
-    "--mount", `type=volume,source=${resources.volumes[1]},target=/downloads,readonly`,
-    RCLONE_IMAGE,
-    "--config", "/config/rclone/rclone.conf",
-    "copyto", source, destination,
-    "--retries", "3",
-    "--low-level-retries", "10",
-    "--retries-sleep", "10s",
-    "--use-json-log",
-    "--log-level", "ERROR",
-    "--stats", "0",
-  ], 0, cancellation);
+    "create", "--name", resources.rcloneExtractionContainer,
+    "--entrypoint", "/bin/true", RCLONE_IMAGE,
+  ], 60_000, cancellation).catch(() => {
+    throw new FixedServiceError("startup", "Rclone executable setup failed.");
+  });
+  try {
+    await runCommand("docker", [
+      "cp", `${resources.rcloneExtractionContainer}:/usr/local/bin/rclone`, resources.rclone.binary,
+    ], 60_000, cancellation);
+    await chmod(resources.rclone.binary, 0o700);
+  } catch {
+    throw new FixedServiceError("startup", "Rclone executable setup failed.");
+  } finally {
+    await runCommand("docker", ["rm", "--force", resources.rcloneExtractionContainer], 30_000)
+      .catch(() => undefined);
+  }
 }
 
-/** @param {OwnedResources} resources @param {string} sessionAddress @param {AbortSignal} cancellation */
-async function startAdapter(resources, sessionAddress, cancellation) {
+/** @param {OwnedResources} resources @param {AbortSignal} cancellation */
+async function startRcloneMounts(resources, cancellation) {
+  if (!resources.rclone) return;
+  const fuse = await lstat("/dev/fuse").catch(() => undefined);
+  if (!fuse?.isCharacterDevice()) throw new FixedServiceError("startup", "FUSE is unavailable.");
+  await runCommand("fusermount3", ["--version"], 5_000).catch(() => {
+    throw new FixedServiceError("startup", "FUSE is unavailable.");
+  });
+  for (const mount of resources.rclone.mounts) {
+    const mountPath = join(resources.rclone.mountRoot, mount.id);
+    const child = spawn(resources.rclone.binary, [
+      "--config", resources.rclone.privateConfigFile,
+      "mount", mount.source, mountPath,
+      "--allow-other",
+      "--vfs-cache-mode", "writes",
+      "--cache-dir", join(resources.rclone.cacheRoot, mount.id),
+      "--log-level", "ERROR",
+    ], { env: process.env, stdio: ["ignore", "ignore", "pipe"] });
+    let diagnostics = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => {
+      diagnostics = `${diagnostics}${chunk}`.slice(-4_096);
+    });
+    resources.rclone.processes.push({ child, mountPath });
+    const exited = new Promise((resolvePromise) => {
+      child.once("error", resolvePromise);
+      child.once("close", resolvePromise);
+    });
+    const deadline = Date.now() + 30_000;
+    while (!cancellation.aborted && Date.now() < deadline) {
+      const ready = await runCommand("mountpoint", ["--quiet", mountPath], 5_000).then(() => true, () => false);
+      if (ready) break;
+      const stopped = await Promise.race([exited.then(() => true), abortableDelay(250, cancellation).then(() => false)]);
+      if (stopped) throw new FixedServiceError("startup", "Rclone mount failed.");
+    }
+    const ready = await runCommand("mountpoint", ["--quiet", mountPath], 5_000).then(() => true, () => false);
+    if (!ready) {
+      if (diagnostics) console.error("Rclone mount did not become ready.");
+      throw new FixedServiceError("startup", "Rclone mount was not ready.");
+    }
+  }
+}
+
+/** @param {OwnedResources} resources @param {AbortSignal} cancellation */
+async function startAdapter(resources, cancellation) {
   const args = resources.service === "chrome"
     ? chromeDockerArgs(resources)
-    : resources.service === "motrix"
-      ? motrixDockerArgs(resources, sessionAddress)
-      : openlistDockerArgs(resources);
+    : openlistDockerArgs(resources);
   await runCommand("docker", args, 60_000, cancellation);
 }
 
@@ -850,12 +654,22 @@ function commonDockerArgs(resources) {
     "--publish",
     `${ORIGIN_HOST}:${originPort(resources.service)}:${containerPort(resources.service)}`,
     "--restart", "no",
+    ...rcloneDockerMountArgs(resources),
   ];
+}
+
+/** @param {OwnedResources} resources */
+function rcloneDockerMountArgs(resources) {
+  const rclone = resources.rclone;
+  if (!rclone) return [];
+  return rclone.mounts.flatMap(({ id }) => [
+    "--mount", `type=bind,source=${join(rclone.mountRoot, id)},target=/mnt/rclone/${id}`,
+  ]);
 }
 
 /** @param {Service} service */
 function containerPort(service) {
-  return service === "chrome" ? 3000 : service === "motrix" ? 8080 : 5244;
+  return service === "chrome" ? 3000 : 5244;
 }
 
 /** @param {OwnedResources} resources */
@@ -869,36 +683,6 @@ function chromeDockerArgs(resources) {
     "--mount", `type=volume,source=${resources.volumes[0]},target=/config`,
     "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/session-credential,readonly`,
     resources.image,
-  ];
-}
-
-/** @param {OwnedResources} resources @param {string} sessionAddress */
-function motrixDockerArgs(resources, sessionAddress) {
-  if (!resources.upload) throw new Error("missing upload configuration");
-  const [defaultDestination] = resources.upload.destinations;
-  if (!defaultDestination) throw new Error("missing upload destinations");
-  return [
-    ...commonDockerArgs(resources),
-    "--user", "1000:1000",
-    "--read-only",
-    "--init",
-    "--cap-drop", "ALL",
-    "--security-opt", "no-new-privileges",
-    "--env", `MOTRIX_PUBLIC_URL=${sessionAddress}`,
-    "--env", `MOTRIX_DEFAULT_SAVE_DIR=${defaultDestination.localRoot}`,
-    "--env", `MOTRIX_ALLOWED_SAVE_DIRS=${resources.upload.destinations.map(({ localRoot }) => localRoot).join(":")}`,
-    "--entrypoint", "/bin/sh",
-    "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-    "--stop-timeout", "120",
-    "--mount", `type=volume,source=${resources.volumes[0]},target=/data`,
-    "--mount", `type=volume,source=${resources.volumes[1]},target=/downloads`,
-    "--mount", `type=bind,source=${resources.credentialFile},target=/run/secrets/motrix-operator-token,readonly`,
-    resources.image,
-    "-c",
-    'MOTRIX_OPERATOR_TOKEN="$(cat /run/secrets/motrix-operator-token)" || { echo "Motrix bootstrap could not read the operator token file." >&2; exit 64; }; [ -n "$MOTRIX_OPERATOR_TOKEN" ] || { echo "Motrix bootstrap received an empty operator token." >&2; exit 65; }; export MOTRIX_OPERATOR_TOKEN; exec docker-entrypoint.sh "$@"',
-    "--",
-    "node",
-    "dist/server/index.mjs",
   ];
 }
 
@@ -931,11 +715,11 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
   let openlistFailure = "local";
   let localLoginComplete = false;
   while (!cancellation.aborted) {
+    if (resources.rclone?.processes.some(({ child }) => childFinished(child))) {
+      throw new FixedServiceError("startup", "Rclone mount exited during startup.");
+    }
     if (!(await containerRunning(resources.container, cancellation))) {
       if (cancellation.aborted) break;
-      if (resources.service === "motrix") {
-        await reportMotrixStartupExit(resources.container, credential);
-      }
       throw new FixedServiceError("startup", "Selected Service exited during startup.");
     }
     if (resources.service === "openlist") {
@@ -981,19 +765,20 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
  * @param {string} credential
  * @param {string} sessionAddress
  * @param {AbortSignal} cancellation
- * @param {RcloneUploader | undefined} uploader
  */
-async function supervise(resources, credential, sessionAddress, cancellation, uploader) {
+async function supervise(resources, credential, sessionAddress, cancellation) {
   let unhealthySince;
   while (!cancellation.aborted) {
     if (!(await containerRunning(resources.container, cancellation))) {
       if (cancellation.aborted) break;
       throw new FixedServiceError("runtime", "Selected Service exited.");
     }
+    if (resources.rclone?.processes.some(({ child }) => childFinished(child))) {
+      throw new FixedServiceError("runtime", "Rclone mount exited.");
+    }
     await assertFreeSpace();
     try {
-      const tasks = await requiredHealth(resources.service, credential, sessionAddress);
-      if (uploader && tasks) uploader.observe(tasks);
+      await requiredHealth(resources.service, credential, sessionAddress);
       unhealthySince = undefined;
     } catch {
       unhealthySince ??= Date.now();
@@ -1003,18 +788,6 @@ async function supervise(resources, credential, sessionAddress, cancellation, up
     }
     await abortableDelay(1_000, cancellation);
   }
-}
-
-/** @param {string} credential */
-async function queryMotrixTasks(credential) {
-  const value = await httpJson(
-    `http://${ORIGIN_HOST}:${originPort("motrix")}/rpc/query/query%3AlistTasks`,
-    { authorization: `Bearer ${credential}` },
-    "POST",
-    '{"args":[]}',
-  );
-  if (!Array.isArray(value)) throw new Error("unhealthy");
-  return value;
 }
 
 /** @param {Service} service @param {string} credential @param {string} sessionAddress */
@@ -1034,11 +807,7 @@ async function requiredHealth(service, credential, sessionAddress) {
     await httpStatus(`${sessionAddress}/`, {});
     return;
   }
-  const [, tasks] = await Promise.all([
-    httpStatus(`${localBase}/healthz`, {}),
-    queryMotrixTasks(credential),
-  ]);
-  return tasks;
+  throw new Error("invalid service");
 }
 
 /** @param {string} credential */
@@ -1098,7 +867,7 @@ function httpJson(url, headers, method, body, signal) {
       response.setEncoding("utf8");
       response.on("data", (chunk) => {
         output += chunk;
-        if (output.length > MAX_TASK_RESPONSE) response.destroy(new Error("response too large"));
+        if (output.length > MAX_JSON_RESPONSE) response.destroy(new Error("response too large"));
       });
       response.on("end", () => {
         signal?.removeEventListener("abort", cancel);
@@ -1180,24 +949,23 @@ function waitForContainerExit(container) {
   });
 }
 
-/** @param {string} container @param {string} credential */
-async function reportMotrixStartupExit(container, credential) {
-  const state = await runCommand("docker", [
-    "inspect",
-    "--format",
-    "exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{json .State.Error}}",
-    container,
-  ], 5_000).catch(() => "state unavailable");
-  const logs = await runCommand("docker", ["logs", "--tail", "80", container], 5_000)
-    .catch(() => "");
-  const redacted = (credential ? logs.split(credential).join("<REDACTED>") : logs)
-    .replace(/((?:authorization|password|secret|token)["']?\s*[:=]\s*["']?)[^\s,"'}]+/giu, "$1<REDACTED>");
-  const relevant = redacted
-    .split(/\r?\n/u)
-    .filter((/** @type {string} */ line) => /bootstrap|fatal|error|invalid|denied|failed|EACCES|ENOENT/iu.test(line))
-    .slice(-12);
-  console.error(`[DEBUG-motrix-exit] ${state.trim()}`);
-  for (const line of relevant) console.error(`[DEBUG-motrix-exit] ${line.slice(0, 1_000)}`);
+/** @param {import("node:child_process").ChildProcess} child @param {number} timeout */
+function waitForChildExit(child, timeout) {
+  if (childFinished(child)) return Promise.resolve();
+  return /** @type {Promise<void>} */ (new Promise((resolvePromise) => {
+    const finish = () => {
+      clearTimeout(timer);
+      child.removeListener("close", finish);
+      resolvePromise();
+    };
+    const timer = setTimeout(finish, timeout);
+    child.once("close", finish);
+  }));
+}
+
+/** @param {import("node:child_process").ChildProcess} child */
+function childFinished(child) {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 /** @param {FailurePhase} [phase] */
@@ -1213,10 +981,6 @@ async function assertFreeSpace(phase = "runtime") {
 async function cleanup(resources, ownedFiles) {
   let failed = false;
   if (resources) {
-    if (resources.service === "motrix") {
-      await runCommand("docker", ["rm", "--force", resources.tokenPreparationContainer], 30_000)
-        .catch(() => undefined);
-    }
     if (resources.service === "openlist") {
       for (const container of [
         resources.openlistPermissionContainer,
@@ -1224,12 +988,20 @@ async function cleanup(resources, ownedFiles) {
         resources.openlistBootstrapContainer,
       ]) await runCommand("docker", ["rm", "--force", container], 30_000).catch(() => undefined);
     }
-    if (resources.upload) {
-      await runCommand("docker", ["rm", "--force", `${resources.container}-rclone-upload`], 30_000).catch(() => undefined);
-      await runCommand("docker", ["rm", "--force", `${resources.container}-rclone-config-check`], 30_000).catch(() => undefined);
-    }
-    await runCommand("docker", ["stop", "--time", resources.service === "motrix" ? "120" : "10", resources.container], 130_000).catch(() => { failed = true; });
+    await runCommand("docker", ["rm", "--force", resources.rcloneExtractionContainer], 30_000).catch(() => undefined);
+    await runCommand("docker", ["stop", "--time", "10", resources.container], 30_000).catch(() => { failed = true; });
     await runCommand("docker", ["rm", "--force", resources.container], 30_000).catch(() => { failed = true; });
+    if (resources.rclone) {
+      for (const { child, mountPath } of [...resources.rclone.processes].reverse()) {
+        await runCommand("fusermount3", ["-u", mountPath], 30_000).catch(() => { failed = true; });
+        if (!childFinished(child)) child.kill("SIGTERM");
+        await waitForChildExit(child, 5_000);
+        if (!childFinished(child)) {
+          child.kill("SIGKILL");
+          failed = true;
+        }
+      }
+    }
     for (const volume of resources.volumes) {
       await runCommand("docker", ["volume", "rm", volume], 30_000).catch(() => { failed = true; });
     }
@@ -1261,7 +1033,6 @@ function accessGuidance(service) {
   if (service === "chrome") {
     return `Use native Basic Auth with username \`${CHROME_USERNAME}\` and the Session Credential.`;
   }
-  if (service === "motrix") return "Use the native Motrix login with the Motrix Operator Token.";
   return `Use the native OpenList login with username \`${OPENLIST_USERNAME}\` and the Session Credential.`;
 }
 

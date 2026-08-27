@@ -1,17 +1,25 @@
 #!/usr/bin/env node
 
-import { appendFileSync, chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 appendFileSync(process.env.FAKE_DOCKER_LOG, `${JSON.stringify(args)}\n`);
 const stoppedMarker = `${process.env.FAKE_DOCKER_LOG}.stopped`;
-const motrixTokenPreparedMarker = `${process.env.FAKE_DOCKER_LOG}.motrix-token-prepared`;
 const openlistPreparedMarker = `${process.env.FAKE_DOCKER_LOG}.openlist-prepared`;
 const openlistAdminState = `${process.env.FAKE_DOCKER_LOG}.openlist-admin`;
 
 switch (args[0]) {
   case "pull":
+    break;
+  case "create":
+    process.stdout.write("fake-extraction-container\n");
+    break;
+  case "cp":
+    if (!process.env.FAKE_RCLONE_FIXTURE || !args[2]) process.exitCode = 2;
+    else {
+      copyFileSync(process.env.FAKE_RCLONE_FIXTURE, args[2]);
+      chmodSync(args[2], 0o700);
+    }
     break;
   case "stop":
     writeFileSync(stoppedMarker, "stopped");
@@ -51,52 +59,8 @@ switch (args[0]) {
       if (script.includes("./openlist admin set")) {
         writeFileSync(openlistAdminState, readFileSync(credentialSource, "utf8"));
       }
-    } else if (args.some((argument) => argument.endsWith("-token-permissions"))) {
-      if (existsSync(`${process.env.FAKE_DOCKER_LOG}.token-permission-hang`)) {
-        setInterval(() => {}, 1_000);
-        break;
-      }
-      if (existsSync(`${process.env.FAKE_DOCKER_LOG}.token-permission-failure`)) {
-        process.exitCode = 1;
-        break;
-      }
-      const tokenMount = args.find((argument) => argument.includes("target=/run/secrets/motrix-operator-token"));
-      const source = tokenMount?.match(/(?:^|,)source=([^,]+),target=\/run\/secrets\/motrix-operator-token(?:,|$)/)?.[1];
-      if (!source) {
-        process.exitCode = 2;
-        break;
-      }
-      chmodSync(source, 0o600);
-      writeFileSync(motrixTokenPreparedMarker, "1000:1000:600");
-    } else if (args.includes("--detach") && args.includes("1000:1000") && args.includes("dist/server/index.mjs") && !existsSync(motrixTokenPreparedMarker)) {
-      process.stderr.write("Motrix bootstrap could not read the operator token file.\n");
-      process.exitCode = 64;
-    } else if (args.includes("copyto")) {
-      const failures = `${process.env.FAKE_DOCKER_LOG}.rclone-failures`;
-      const remaining = existsSync(failures) ? Number(readFileSync(failures, "utf8")) : 0;
-      if (remaining > 0) {
-        writeFileSync(failures, String(remaining - 1));
-        const errorFile = `${process.env.FAKE_DOCKER_LOG}.rclone-error`;
-        const exitCodeFile = `${process.env.FAKE_DOCKER_LOG}.rclone-exit-code`;
-        if (existsSync(errorFile)) process.stderr.write(readFileSync(errorFile, "utf8"));
-        process.exitCode = existsSync(exitCodeFile)
-          ? Number(readFileSync(exitCodeFile, "utf8"))
-          : 1;
-        break;
-      }
     }
-    if (args.includes("listremotes")) {
-      const configMount = args.find((argument) => argument.includes("target=/config/rclone"));
-      const source = configMount?.match(/(?:^|,)source=([^,]+),target=\/config\/rclone(?:,|$)/)?.[1];
-      if (!source) {
-        process.exitCode = 2;
-        break;
-      }
-      const config = readFileSync(join(source, "rclone.conf"), "utf8");
-      for (const match of config.matchAll(/^\[([^\]\r\n]+)\]\s*$/gm)) {
-        process.stdout.write(`${match[1]}:\n`);
-      }
-    } else if (args.includes("--interactive")) {
+    if (args.includes("--interactive")) {
       process.stdin.resume();
       process.stdin.once("end", () => process.stdout.write("fake-container-id\n"));
     } else {

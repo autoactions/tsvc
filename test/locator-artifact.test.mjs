@@ -29,12 +29,12 @@ test("appends encrypted Sensitive Facts when the service publishes them", () => 
   try {
     const path = writeLocatorArtifact({
       address: "https://session-test.trycloudflare.com",
-      sensitiveFacts: `## Sensitive Facts\n\n- Motrix Operator Token: ${encrypted}\n`,
+      sensitiveFacts: `## Sensitive Facts\n\n- Recovery Key: ${encrypted}\n`,
       directory,
     });
     assert.equal(
       readFileSync(path, "utf8"),
-      `## Locators\n- Session Address: https://session-test.trycloudflare.com\n\n## Sensitive Facts\n\n- Motrix Operator Token: ${encrypted}\n`,
+      `## Locators\n- Session Address: https://session-test.trycloudflare.com\n\n## Sensitive Facts\n\n- Recovery Key: ${encrypted}\n`,
     );
   } finally {
     rmSync(directory, { recursive: true });

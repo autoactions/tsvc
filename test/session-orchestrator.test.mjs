@@ -55,10 +55,10 @@ async function waitUntil(predicate, timeout = 15_000) {
 test("RD-01 writes the Session Address only under ## Locators", () => {
   const source = readFileSync(new URL("../src/session.mjs", import.meta.url), "utf8");
   const ready = source.slice(source.indexOf("function writeReadySummary"), source.indexOf("function locatorBlock"));
-  assert.match(ready, /locatorBlock\(address\)/);
+  assert.match(ready, /locatorBlock\(options\.service, address\)/);
   assert.doesNotMatch(ready, /`- Session Address:/);
   assert.match(source, /function locatorBlock[\s\S]*## Locators[\s\S]*Session Address: \$\{address\}/);
-  assert.match(source, /console\.log\(locatorBlock\(sessionAddress\)/);
+  assert.match(source, /console\.log\(locatorBlock\(options\.service, sessionAddress\)/);
   const readyStart = source.indexOf("writeReadySummary(");
   const write = source.indexOf("writeLocatorArtifact(", readyStart);
   const wait = source.indexOf("await Promise.race", write);
@@ -153,10 +153,11 @@ test("RD-01 gates the Session Address and reduces a later failure Summary", asyn
     assert.match(output, /## Locators/);
     assert.match(
       readFileSync(join(root, "session-deck-output.md"), "utf8"),
-      /^## Locators\n- Session Address: https:\/\/session-test\.trycloudflare\.com(?::\d+)?\n$/,
+      /^## Locators\n- Session Address: https:\/\/session-test\.trycloudflare\.com(?::\d+)?\n- Username: admin\n$/,
     );
     const readySummary = readFileSync(summary, "utf8");
     assert.match(readySummary, /## Locators\n\n- Session Address: https:\/\/session-test\.trycloudflare\.com/);
+    assert.match(readySummary, /- Username: admin/);
     assert.doesNotMatch(readySummary.split("## Locators")[1] ?? "", /Access:/);
     assert.equal(readySummary.match(/https:\/\/session-test\.trycloudflare\.com/g)?.length, 1);
     assert.doesNotMatch(readySummary, new RegExp(credential));

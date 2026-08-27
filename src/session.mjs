@@ -262,15 +262,17 @@ async function runSession(options, shutdown) {
     if (!artifactDirectory || !isAbsolute(artifactDirectory)) {
       throw new FixedSessionError("startup", "Locator Artifact directory is invalid.");
     }
+    const username = sessionUsername(options.service);
     writeLocatorArtifact({
       address: sessionAddress,
+      ...(username ? { username } : {}),
       ...(options.sensitiveFactsFile
         ? { sensitiveFacts: readSensitiveFactsBlock(options.sensitiveFactsFile) }
         : {}),
       directory: artifactDirectory,
     });
     console.log("Session Ready.");
-    console.log(locatorBlock(sessionAddress).trimEnd());
+    console.log(locatorBlock(options.service, sessionAddress).trimEnd());
     if (options.sensitiveFactsFile) console.log(readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());
 
     await Promise.race([
@@ -437,7 +439,7 @@ function writeReadySummary(options, address, guidance) {
     `- Expected expiry: ${expectedExpiry.toISOString()}`,
     `- Access: ${guidance}`,
     "",
-    locatorBlock(address).trimEnd(),
+    locatorBlock(options.service, address).trimEnd(),
   ];
   if (options.sensitiveFactsFile) lines.push("", readSensitiveFactsBlock(options.sensitiveFactsFile).trimEnd());
   writeFileSync(summary, `${lines.join("\n")}\n`, { mode: 0o600 });
@@ -455,9 +457,17 @@ function readSensitiveFactsBlock(path) {
   return block;
 }
 
-/** @param {string} address */
-function locatorBlock(address) {
-  return ["## Locators", "", `- Session Address: ${address}`, ""].join("\n");
+/** @param {Service} service @returns {string | undefined} */
+function sessionUsername(service) {
+  return service === "motrix" ? undefined : "admin";
+}
+
+/** @param {Service} service @param {string} address */
+function locatorBlock(service, address) {
+  const lines = ["## Locators", "", `- Session Address: ${address}`];
+  const username = sessionUsername(service);
+  if (username) lines.push(`- Username: ${username}`);
+  return [...lines, ""].join("\n");
 }
 
 /** @param {Promise<unknown>} exit @param {string} summary @returns {Promise<never>} */

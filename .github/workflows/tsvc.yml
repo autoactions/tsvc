@@ -155,7 +155,7 @@ jobs:
         shell: bash
         env:
           SESSION_PASSWORD: ${{ secrets.SESSION_PASSWORD }}
-        run: node scripts/stage-credential.mjs "$RUNNER_TEMP/session-credential"
+        run: node scripts/stage-credential.mjs "$RUNNER_TEMP/session-credential" "$RUNNER_TEMP/sensitive-facts"
 
       - name: Stage Motrix Operator Token
         if: ${{ inputs.service == 'motrix' }}
@@ -181,10 +181,9 @@ jobs:
           upload_args=()
           database_args=()
           credential_file="$RUNNER_TEMP/session-credential"
-          sensitive_args=()
+          sensitive_args=(--sensitive-facts-file "$RUNNER_TEMP/sensitive-facts")
           if [[ "$INPUT_SERVICE" == "motrix" ]]; then
             credential_file="$RUNNER_TEMP/motrix-operator-token"
-            sensitive_args+=(--sensitive-facts-file "$RUNNER_TEMP/sensitive-facts")
             upload_args+=(
               --rclone-config-file "$RUNNER_TEMP/rclone.conf"
               --rclone-destinations-file "$RUNNER_TEMP/rclone-destinations.json"

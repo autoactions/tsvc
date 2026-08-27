@@ -40,3 +40,20 @@ test("appends encrypted Sensitive Facts when the service publishes them", () => 
     rmSync(directory, { recursive: true });
   }
 });
+
+test("adds a public username when the service has one", () => {
+  const directory = mkdtempSync(join(tmpdir(), "locator-artifact-"));
+  try {
+    const path = writeLocatorArtifact({
+      address: "https://session-test.trycloudflare.com",
+      username: "admin",
+      directory,
+    });
+    assert.equal(
+      readFileSync(path, "utf8"),
+      "## Locators\n- Session Address: https://session-test.trycloudflare.com\n- Username: admin\n",
+    );
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});

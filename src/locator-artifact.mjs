@@ -5,12 +5,13 @@ export const LOCATOR_ARTIFACT_NAME = "session-deck-locators";
 export const LOCATOR_ARTIFACT_FILE = "session-deck-output.md";
 
 /**
- * @param {{ address: string, sensitiveFacts?: string, directory: string }} options
+ * @param {{ address: string, username?: string, sensitiveFacts?: string, directory: string }} options
  * @returns {string}
  */
-export function writeLocatorArtifact({ address, sensitiveFacts, directory }) {
+export function writeLocatorArtifact({ address, username, sensitiveFacts, directory }) {
   if (!isAbsolute(directory)) throw new Error("Locator Artifact directory is invalid.");
   const locators = ["## Locators", `- Session Address: ${address}`];
+  if (username) locators.push(`- Username: ${username}`);
   const document = sensitiveFacts
     ? `${locators.join("\n")}\n\n${sensitiveFacts.trimEnd()}\n`
     : `${locators.join("\n")}\n`;

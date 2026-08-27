@@ -162,6 +162,7 @@ test("WF-01 workflow pins its immutable execution policy", () => {
   )?.[1] ?? "";
   assert.match(chromeCredentialStep, /if: \$\{\{ inputs\.service == 'chrome' \|\| inputs\.service == 'openlist' \}\}/);
   assert.match(chromeCredentialStep, /SESSION_PASSWORD: \$\{\{ secrets\.SESSION_PASSWORD \}\}/);
+  assert.match(chromeCredentialStep, /stage-credential\.mjs "\$RUNNER_TEMP\/session-credential" "\$RUNNER_TEMP\/sensitive-facts"/);
   assert.doesNotMatch(chromeCredentialStep, /MOTRIX_OPERATOR_TOKEN/);
   assert.match(motrixCredentialStep, /if: \$\{\{ inputs\.service == 'motrix' \}\}/);
   assert.match(motrixCredentialStep, /SESSION_PASSWORD: \$\{\{ secrets\.SESSION_PASSWORD \}\}/);

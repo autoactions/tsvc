@@ -31,7 +31,7 @@ test("WF-01 rejects invalid raw dispatch values before checkout", () => {
   }).status, 2);
 });
 
-test("WF-03 validates optional paired Rclone configuration", () => {
+test("WF-03 validates optional Rclone mounts", () => {
   const script = stepScript("Validate optional Rclone configuration", "Validate database configuration");
   /** @param {string} configured @param {string} mounts */
   const validate = (configured, mounts) => spawnSync("bash", ["-c", script], {
@@ -42,9 +42,9 @@ test("WF-03 validates optional paired Rclone configuration", () => {
     },
   });
   assert.equal(validate("false", "").status, 0);
+  assert.equal(validate("true", "").status, 0);
   assert.equal(validate("true", "archive=drive:archive\nmedia=s3:bucket/media").status, 0);
   for (const [configured, mounts] of /** @type {[string, string][]} */ ([
-    ["true", ""],
     ["false", "archive=drive:"],
     ["true", "bad/id=drive:"],
     ["true", "same=drive:\nsame=s3:"],

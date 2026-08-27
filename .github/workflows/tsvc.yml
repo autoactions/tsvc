@@ -42,8 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RCLONE_CONFIG_CONFIGURED" == "true" && -z "$RCLONE_MOUNTS" ]] || \
-             [[ "$RCLONE_CONFIG_CONFIGURED" != "true" && -n "$RCLONE_MOUNTS" ]]; then
+          if [[ "$RCLONE_CONFIG_CONFIGURED" != "true" && -n "$RCLONE_MOUNTS" ]]; then
             echo "Incomplete Rclone configuration" >&2
             exit 2
           fi

@@ -167,7 +167,7 @@ async function runLifecycle(options, ready, finished) {
     const container = resources.container;
     const containerExit = waitForContainerExit(container);
     await Promise.race([
-      waitForReadiness(resources, credential, options.sessionAddress, options.cancellation),
+      waitForReadiness(resources, credential, options.cancellation),
       containerExit.then(async () => {
         if (options.cancellation.aborted) return new Promise(() => {});
         throw new FixedServiceError("startup", "Selected Service exited during startup.");
@@ -180,7 +180,7 @@ async function runLifecycle(options, ready, finished) {
       ...(username ? { username } : {}),
     });
     await Promise.race([
-      supervise(resources, credential, options.sessionAddress, options.cancellation),
+      supervise(resources, credential, options.cancellation),
       containerExit.then(() => {
         if (options.cancellation.aborted) return new Promise(() => {});
         throw new FixedServiceError("runtime", "Selected Service exited.");
@@ -730,10 +730,9 @@ function openlistDockerArgs(resources) {
 /**
  * @param {OwnedResources} resources
  * @param {string} credential
- * @param {string} sessionAddress
  * @param {AbortSignal} cancellation
  */
-async function waitForReadiness(resources, credential, sessionAddress, cancellation) {
+async function waitForReadiness(resources, credential, cancellation) {
   let openlistFailure = "local";
   let localLoginComplete = false;
   while (!cancellation.aborted) {
@@ -763,18 +762,10 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
         await abortableDelay(1_000, cancellation);
         continue;
       }
-      try {
-        await httpStatus(`${sessionAddress}/`, {});
-        console.log("Startup stage complete: Public access.");
-        return;
-      } catch {
-        openlistFailure = "public";
-        await abortableDelay(1_000, cancellation);
-      }
-      continue;
+      return;
     }
     try {
-      await requiredHealth(resources.service, credential, sessionAddress);
+      await requiredLocalHealth(resources.service, credential);
       return;
     } catch {
       await abortableDelay(1_000, cancellation);
@@ -785,9 +776,7 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
       "startup",
       openlistFailure === "local"
         ? "Local OpenList login was not ready."
-        : openlistFailure === "offline-tools"
-          ? "OpenList offline download tools were not ready."
-          : "Public access was not ready.",
+        : "OpenList offline download tools were not ready.",
     );
   }
   throw new FixedServiceError("startup", "Session startup was cancelled.");
@@ -796,10 +785,9 @@ async function waitForReadiness(resources, credential, sessionAddress, cancellat
 /**
  * @param {OwnedResources} resources
  * @param {string} credential
- * @param {string} sessionAddress
  * @param {AbortSignal} cancellation
  */
-async function supervise(resources, credential, sessionAddress, cancellation) {
+async function supervise(resources, credential, cancellation) {
   let unhealthySince;
   while (!cancellation.aborted) {
     if (!(await containerRunning(resources.container, cancellation))) {
@@ -811,7 +799,7 @@ async function supervise(resources, credential, sessionAddress, cancellation) {
     }
     await assertFreeSpace();
     try {
-      await requiredHealth(resources.service, credential, sessionAddress);
+      await requiredLocalHealth(resources.service, credential);
       unhealthySince = undefined;
     } catch {
       unhealthySince ??= Date.now();
@@ -823,29 +811,24 @@ async function supervise(resources, credential, sessionAddress, cancellation) {
   }
 }
 
-/** @param {Service} service @param {string} credential @param {string} sessionAddress */
-async function requiredHealth(service, credential, sessionAddress) {
+/** @param {Service} service @param {string} credential */
+async function requiredLocalHealth(service, credential) {
   const localBase = `http://${ORIGIN_HOST}:${originPort(service)}`;
   if (service === "chrome") {
     const authorization = `Basic ${Buffer.from(`${CHROME_USERNAME}:${credential}`).toString("base64")}`;
     await Promise.all([
       httpStatus(`${localBase}/`, { authorization }),
-      httpStatus(`${sessionAddress}/`, { authorization }),
-      websocketUpgrade(`${sessionAddress}/websocket`, { authorization }),
+      websocketUpgrade(`${localBase}/websocket`, { authorization }),
     ]);
     return;
   }
   if (service === "code-server") {
-    await Promise.all([
-      httpStatus(`${localBase}/login`, {}),
-      httpStatus(`${sessionAddress}/login`, {}),
-    ]);
+    await httpStatus(`${localBase}/login`, {});
     return;
   }
   if (service === "openlist") {
     await openlistLocalLogin(credential);
     await openlistOfflineDownloadTools();
-    await httpStatus(`${sessionAddress}/`, {});
     return;
   }
   throw new Error("invalid service");

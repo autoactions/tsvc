@@ -22,7 +22,7 @@ function serviceOrigin(service) {
   return "http://127.0.0.1:58081";
 }
 
-/** @param {Service} service @param {{ healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, offlineTools: string[], offlineToolsRequests: number, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
+/** @param {Service} service @param {{ healthy: boolean, localLoginHealthy: boolean, offlineTools: string[], offlineToolsRequests: number, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
 function startServiceServer(service, health) {
   const basic = `Basic ${Buffer.from(`admin:${credential}`).toString("base64")}`;
   const server = createServer((request, response) => {
@@ -39,7 +39,7 @@ function startServiceServer(service, health) {
       return;
     }
     if (service === "openlist" && request.url === "/") {
-      response.writeHead(health.publicHealthy ? 200 : 503).end("openlist");
+      response.writeHead(200).end("openlist");
       return;
     }
     if (service === "openlist" && request.method === "POST" && request.url === "/api/auth/login") {
@@ -93,8 +93,8 @@ function startServiceServer(service, health) {
 /**
  * @param {Service} service
  * @param {"cancel" | "exit" | "unhealthy" | "rclone-exit"} [termination]
- * @param {(context: { health: { healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, offlineTools: string[], offlineToolsRequests: number, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }, dockerLog: string, output: string[] }) => Promise<void>} [onReady]
- * @param {{ initialOpenListPassword?: string, startupFailure?: "bootstrap" | "local-login" | "offline-tools" | "public" | "rclone", rclone?: boolean }} [scenario]
+ * @param {(context: { health: { healthy: boolean, localLoginHealthy: boolean, offlineTools: string[], offlineToolsRequests: number, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }, dockerLog: string, output: string[] }) => Promise<void>} [onReady]
+ * @param {{ initialOpenListPassword?: string, startupFailure?: "bootstrap" | "local-login" | "offline-tools" | "rclone", publicUnavailable?: boolean, rclone?: boolean }} [scenario]
  */
 async function exerciseAdapter(service, termination = "cancel", onReady, scenario = {}) {
   const root = mkdtempSync(join(tmpdir(), `service-module-${service}-`));
@@ -152,7 +152,6 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
   const health = {
     healthy: true,
     localLoginHealthy: scenario.startupFailure !== "local-login",
-    publicHealthy: scenario.startupFailure !== "public",
     offlineTools: scenario.startupFailure === "offline-tools" ? ["SimpleHttp"] : ["aria2", "SimpleHttp"],
     offlineToolsRequests: 0,
     openlistAdminState,
@@ -171,7 +170,7 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
     console.log = (...values) => { output.push(values.join(" ")); };
     serviceRun = runSelectedService({
       service,
-      sessionAddress: serviceOrigin(service),
+      sessionAddress: scenario.publicUnavailable ? "http://127.0.0.1:9" : serviceOrigin(service),
       credentialFile: credentialFile,
       cancellation: cancellation.signal,
       ...(scenario.rclone ? {
@@ -191,8 +190,6 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
         // The injected bootstrap command settles on its own.
       } else if (scenario.startupFailure === "offline-tools") {
         await waitUntil(() => health.offlineToolsRequests > 0);
-      } else if (scenario.startupFailure === "public") {
-        await waitUntil(() => output.includes("Startup stage complete: Local OpenList admin login."));
       } else {
         await waitUntil(() => output.includes("Startup stage complete: Service container."));
       }
@@ -202,7 +199,9 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
       const commands = readFileSync(dockerLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
       return { commands, output, result, root, startupFailure: failure };
     }
-    const ready = await serviceRun.ready;
+    const ready = scenario.publicUnavailable
+      ? await readinessWithin(serviceRun.ready, 1_000)
+      : await serviceRun.ready;
     if (service === "code-server") {
       assert.equal(ready.username, undefined);
       assert.match(ready.accessGuidance, /code-server.*Session Credential/);
@@ -244,6 +243,21 @@ async function exerciseAdapter(service, termination = "cancel", onReady, scenari
   }
 }
 
+/** @template T @param {Promise<T>} promise @param {number} milliseconds */
+async function readinessWithin(promise, milliseconds) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("local readiness timed out")), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** @param {() => boolean} predicate @param {number} [timeout] */
 async function waitUntil(predicate, timeout = 10_000) {
   const deadline = Date.now() + timeout;
@@ -268,6 +282,16 @@ test("AU-01 and IS-01 Chrome uses native file-backed authentication and one conf
   assert.doesNotMatch(JSON.stringify(commands), new RegExp(credential));
   assert.doesNotMatch(JSON.stringify(run), /3001|8082|privileged|unconfined|docker\.sock/);
   rmSync(root, { recursive: true });
+});
+
+test("RD-02 selected-Service readiness does not depend on the public endpoint", async () => {
+  for (const service of [/** @type {const} */ ("chrome"), /** @type {const} */ ("openlist"), /** @type {const} */ ("code-server")]) {
+    const { result, root } = await exerciseAdapter(
+      service, "cancel", undefined, { publicUnavailable: true },
+    );
+    assert.deepEqual(result, { status: "success" });
+    rmSync(root, { recursive: true });
+  }
 });
 
 test("AU-04 and IS-01 Code Server uses native file-backed authentication and one confined Origin", async () => {
@@ -371,7 +395,6 @@ test("AU-03, IS-01, and PS-01 OpenList bootstraps a persistent database behind o
     "Startup stage complete: OpenList database bootstrap.",
     "Startup stage complete: Service container.",
     "Startup stage complete: Local OpenList admin login.",
-    "Startup stage complete: Public access.",
   ]);
   assert.doesNotMatch(output.filter((line) => line.startsWith("Startup stage complete:")).join("\n"), /https?:|127\.0\.0\.1|mysql|password|secret/i);
   rmSync(root, { recursive: true });
@@ -428,16 +451,6 @@ test("FL-01 OpenList reports a database bootstrap failure without sensitive outp
   assert.deepEqual(result, startupFailure);
   assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}${JSON.stringify(result)}`, new RegExp(credential));
   assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}${JSON.stringify(result)}`, /database_secret_value/);
-  rmSync(root, { recursive: true });
-});
-
-test("FL-01 OpenList reports public access that never becomes ready", async () => {
-  const { commands, output, result, root, startupFailure } = await exerciseAdapter(
-    "openlist", "cancel", undefined, { startupFailure: "public" },
-  );
-  assert.deepEqual(startupFailure, { phase: "startup", summary: "Public access was not ready." });
-  assert.deepEqual(result, startupFailure);
-  assert.doesNotMatch(`${JSON.stringify(commands)}${output.join("\n")}`, new RegExp(credential));
   rmSync(root, { recursive: true });
 });
 

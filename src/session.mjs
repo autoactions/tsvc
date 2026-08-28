@@ -226,7 +226,7 @@ async function runSession(options, shutdown) {
     }
   }
   console.log(`Starting Session: ${options.service}.`);
-  console.log("Runtime artifacts are pinned; public validation remains separately gated.");
+  console.log("Runtime artifacts are pinned; local Service and Tunnel readiness remain separately gated.");
 
   const log = new BoundedLog(`${process.env.RUNNER_TEMP}/cloudflared.log`);
   const origin = SERVICE_ORIGINS[options.service];

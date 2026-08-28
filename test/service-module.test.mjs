@@ -18,8 +18,8 @@ const codeServerImage = "lscr.io/linuxserver/code-server@sha256:212d588e21815316
 /** @param {Service} service */
 function serviceOrigin(service) {
   if (service === "chrome") return "http://127.0.0.1:58080";
-  if (service === "code-server") return "http://127.0.0.1:58084";
-  return "http://127.0.0.1:58082";
+  if (service === "code-server") return "http://127.0.0.1:58082";
+  return "http://127.0.0.1:58081";
 }
 
 /** @param {Service} service @param {{ healthy: boolean, localLoginHealthy: boolean, publicHealthy: boolean, offlineTools: string[], offlineToolsRequests: number, openlistAdminState: string, tasks: unknown[], commands: { channel: string, args: unknown[] }[], cleanupFailures: number }} health */
@@ -83,7 +83,7 @@ function startServiceServer(service, health) {
       socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
     }
   });
-  const port = service === "chrome" ? 58080 : service === "code-server" ? 58084 : 58082;
+  const port = service === "chrome" ? 58080 : service === "code-server" ? 58082 : 58081;
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server));
@@ -261,7 +261,6 @@ test("AU-01 and IS-01 Chrome uses native file-backed authentication and one conf
   assert.ok(run.includes(chromeImage));
   assert.ok(run.includes("127.0.0.1:58080:3000"));
   assert.equal(run.filter((/** @type {string} */ argument) => argument === "--publish").length, 1);
-  assert.doesNotMatch(JSON.stringify(run), /58081/);
   assert.ok(run.includes("1g"));
   assert.ok(run.includes("START_DOCKER=false"));
   assert.ok(run.includes("CUSTOM_USER=admin"));
@@ -276,7 +275,7 @@ test("AU-04 and IS-01 Code Server uses native file-backed authentication and one
   const run = commands.find((command) => command[0] === "run" && command.includes("--detach"));
   assert.ok(run);
   assert.ok(run.includes(codeServerImage));
-  assert.ok(run.includes("127.0.0.1:58084:8443"));
+  assert.ok(run.includes("127.0.0.1:58082:8443"));
   assert.equal(run.filter((/** @type {string} */ argument) => argument === "--publish").length, 1);
   assert.ok(run.includes("FILE__PASSWORD=/run/secrets/session-credential"));
   assert.doesNotMatch(JSON.stringify(commands), new RegExp(credential));
@@ -352,7 +351,7 @@ test("AU-03, IS-01, and PS-01 OpenList bootstraps a persistent database behind o
   assert.match(bootstrapScript, /\.\/openlist admin set/);
   assert.match(bootstrapScript, />\/dev\/null 2>&1/);
   assert.ok(run.includes(openlistImage));
-  assert.ok(run.includes("127.0.0.1:58082:5244"));
+  assert.ok(run.includes("127.0.0.1:58081:5244"));
   assert.ok(run.includes("1001:1001"));
   assert.ok(!run.includes("--read-only"));
   assert.ok(run.includes("--init"));

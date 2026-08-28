@@ -15,8 +15,8 @@ const sessionCredential = "123456";
 /** @param {"chrome" | "openlist" | "code-server"} service */
 function servicePort(service) {
   if (service === "chrome") return 58080;
-  if (service === "code-server") return 58084;
-  return 58082;
+  if (service === "code-server") return 58082;
+  return 58081;
 }
 
 /** @param {"chrome"} service @param {string} path @param {Record<string, string>} headers */
@@ -131,7 +131,7 @@ test("AU-03 pinned OpenList authenticates with the current Session Credential", 
   try {
     assertLiveIsolation("openlist", sessionCredential);
     /** @param {string} password */
-    const login = (password) => fetch("http://127.0.0.1:58082/api/auth/login", {
+    const login = (password) => fetch("http://127.0.0.1:58081/api/auth/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ username: "admin", password }),
@@ -143,7 +143,7 @@ test("AU-03 pinned OpenList authenticates with the current Session Credential", 
     const payload = await response.json();
     assert.equal(payload.code, 200);
     assert.equal(typeof payload.data?.token, "string");
-    const toolsResponse = await fetch("http://127.0.0.1:58082/api/public/offline_download_tools");
+    const toolsResponse = await fetch("http://127.0.0.1:58081/api/public/offline_download_tools");
     assert.equal(toolsResponse.status, 200);
     const toolsPayload = await toolsResponse.json();
     assert.equal(toolsPayload.code, 200);
@@ -163,7 +163,7 @@ test("AU-04 pinned Code Server authenticates with the current Session Credential
   const live = await withLiveService("code-server");
   try {
     assertLiveIsolation("code-server", sessionCredential);
-    const response = await fetch("http://127.0.0.1:58084/login");
+    const response = await fetch("http://127.0.0.1:58082/login");
     assert.equal(response.status, 200);
   } finally {
     live.cancellation.abort();

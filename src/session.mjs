@@ -15,13 +15,18 @@ import http from "node:http";
 import { isAbsolute, resolve, sep } from "node:path";
 
 import { writeLocatorArtifact } from "./locator-artifact.mjs";
+import {
+  NamedTunnelConfigError,
+  NamedTunnelConfigNotApplied,
+  namedTunnelAddressFromConfig,
+} from "./named-tunnel-config.mjs";
 import { runSelectedService } from "./service-module.mjs";
 import { parseRcloneMounts } from "./rclone-mounts.mjs";
 
 const SERVICE_ORIGINS = {
   chrome: "http://127.0.0.1:58080",
-  openlist: "http://127.0.0.1:58082",
-  "code-server": "http://127.0.0.1:58084",
+  openlist: "http://127.0.0.1:58081",
+  "code-server": "http://127.0.0.1:58082",
 };
 const METRICS_ORIGIN = "http://127.0.0.1:49312";
 const STARTUP_TIMEOUT_MS = process.env.NODE_TEST_CONTEXT && process.env.TSVC_TEST_STARTUP_TIMEOUT_MS
@@ -39,6 +44,7 @@ const ARGUMENT_NAMES = new Set([
   "database-file",
   "database-ca-file",
   "sensitive-facts-file",
+  "named-tunnel-token-file",
 ]);
 
 /** @typedef {"chrome" | "openlist" | "code-server"} Service */
@@ -51,6 +57,7 @@ const ARGUMENT_NAMES = new Set([
  *   rclone?: { configFile: string, mountsFile: string },
  *   database?: { file: string, caFile: string },
  *   sensitiveFactsFile?: string,
+ *   namedTunnelTokenFile?: string,
  * }} SessionOptions
  */
 
@@ -111,6 +118,7 @@ function parseArguments(argv) {
   const databaseFile = values["database-file"];
   const databaseCaFile = values["database-ca-file"];
   const sensitiveFactsFile = values["sensitive-facts-file"];
+  const namedTunnelTokenFile = values["named-tunnel-token-file"];
   if (
     (service !== "chrome" && service !== "openlist" && service !== "code-server") ||
     !credentialFile || !cloudflared || !startedEpochFile ||
@@ -119,6 +127,9 @@ function parseArguments(argv) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
   if (sensitiveFactsFile && !isAbsolute(sensitiveFactsFile)) {
+    throw new FixedSessionError("startup", "Session arguments are invalid.");
+  }
+  if (namedTunnelTokenFile && !isAbsolute(namedTunnelTokenFile)) {
     throw new FixedSessionError("startup", "Session arguments are invalid.");
   }
   if (
@@ -147,6 +158,7 @@ function parseArguments(argv) {
     ...(rclone ? { rclone } : {}),
     ...(database ? { database } : {}),
     ...(sensitiveFactsFile ? { sensitiveFactsFile } : {}),
+    ...(namedTunnelTokenFile ? { namedTunnelTokenFile } : {}),
   };
 }
 
@@ -160,6 +172,7 @@ function validateRunnerTemporaryPaths(options) {
   if (options.rclone) paths.push(options.rclone.configFile, options.rclone.mountsFile);
   if (options.database) paths.push(options.database.file, options.database.caFile);
   if (options.sensitiveFactsFile) paths.push(options.sensitiveFactsFile);
+  if (options.namedTunnelTokenFile) paths.push(options.namedTunnelTokenFile);
   for (const path of paths) {
     const resolved = resolve(path);
     const metadata = lstatSync(resolved);
@@ -181,7 +194,21 @@ function validateRunnerTemporaryPaths(options) {
     if (path === options.sensitiveFactsFile && (!metadata.isFile() || (metadata.mode & 0o077) !== 0)) {
       throw new FixedSessionError("startup", "Sensitive Facts file is invalid.");
     }
+    if (
+      path === options.namedTunnelTokenFile &&
+      (!metadata.isFile() || metadata.size === 0 || (metadata.mode & 0o077) !== 0)
+    ) {
+      throw new FixedSessionError("startup", "Named Tunnel token file is invalid.");
+    }
   }
+}
+
+/** @param {string} path */
+function removeInRunnerTemporaryStorage(path) {
+  const runnerTemp = resolve(process.env.RUNNER_TEMP ?? "");
+  const resolved = resolve(path);
+  if (!isAbsolute(runnerTemp) || runnerTemp === sep || !resolved.startsWith(`${runnerTemp}${sep}`)) return;
+  try { unlinkSync(resolved); } catch {}
 }
 
 /** @param {SessionOptions} options @param {AbortController} shutdown */
@@ -203,33 +230,46 @@ async function runSession(options, shutdown) {
 
   const log = new BoundedLog(`${process.env.RUNNER_TEMP}/cloudflared.log`);
   const origin = SERVICE_ORIGINS[options.service];
-  const cloudflaredArguments = [
-    "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:49312",
-    "--url", origin,
-  ];
-  const cloudflared = spawn(options.cloudflared, cloudflaredArguments, {
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  cloudflared.stdout.on("data", (chunk) => log.append(chunk));
-  cloudflared.stderr.on("data", (chunk) => log.append(chunk));
-  const cloudflaredExit = new Promise((resolvePromise) => {
-    cloudflared.once("error", () => resolvePromise("error"));
-    cloudflared.once("exit", (code) => resolvePromise(code));
-  });
-
   const startupDeadline = new AbortController();
   const startupTimer = setTimeout(() => startupDeadline.abort(), STARTUP_TIMEOUT_MS);
   const serviceCancellation = AbortSignal.any([shutdown.signal, startupDeadline.signal]);
   let serviceRun;
+  let tunnel;
   let ready = false;
 
   try {
-    const sessionAddress = await Promise.race([
-      obtainSessionAddress(cloudflared, serviceCancellation),
-      exitAsFailure(cloudflaredExit, "cloudflared exited during startup."),
-    ]);
-    console.log("Startup stage complete: Quick Tunnel address.");
+    if (options.namedTunnelTokenFile) {
+      const namedTunnel = startCloudflared(options.cloudflared, [
+        "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:49312",
+        "run", "--token-file", options.namedTunnelTokenFile,
+      ], log);
+      tunnel = namedTunnel;
+      const namedAddress = await Promise.race([
+        obtainNamedTunnelAddress(namedTunnel.process, origin, serviceCancellation),
+        exitAsFailure(namedTunnel.exit, "Named Tunnel connector exited during startup.", "startup"),
+      ]);
+      if (namedAddress) {
+        namedTunnel.address = namedAddress;
+        tunnel = namedTunnel;
+        console.log("Startup stage complete: Named Tunnel address.");
+      } else {
+        await stopProcess(namedTunnel.process, namedTunnel.exit);
+        tunnel = undefined;
+        console.log("Named Tunnel has no route for the selected Service; starting Quick Tunnel.");
+      }
+    }
+    if (!tunnel) {
+      tunnel = startCloudflared(options.cloudflared, [
+        "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:49312",
+        "--url", origin,
+      ], log);
+      tunnel.address = await Promise.race([
+        obtainQuickTunnelAddress(tunnel.process, serviceCancellation),
+        exitAsFailure(tunnel.exit, "cloudflared exited during startup.", "startup"),
+      ]);
+      console.log("Startup stage complete: Quick Tunnel address.");
+    }
+    const sessionAddress = tunnel.address;
     serviceRun = runSelectedService({
       service: options.service,
       sessionAddress,
@@ -239,12 +279,12 @@ async function runSession(options, shutdown) {
       ...(options.database ? { database: options.database } : {}),
     });
     const serviceReadyPromise = serviceRun.ready;
-    const tunnelReadyPromise = waitForTunnelReady(cloudflared, serviceCancellation);
+    const tunnelReadyPromise = waitForTunnelReady(tunnel.process, serviceCancellation);
     let serviceReady;
     try {
       [serviceReady] = await Promise.race([
         Promise.all([serviceReadyPromise, tunnelReadyPromise]),
-        exitAsFailure(cloudflaredExit, "cloudflared exited during startup."),
+        exitAsFailure(tunnel.exit, "cloudflared exited during startup.", "startup"),
       ]);
     } catch (error) {
       if (startupDeadline.signal.aborted) {
@@ -273,8 +313,8 @@ async function runSession(options, shutdown) {
 
     await Promise.race([
       serviceFinishedAsFailure(serviceRun.finished),
-      monitorTunnel(cloudflared, shutdown.signal),
-      exitAsFailure(cloudflaredExit, "cloudflared exited while the Session was Ready."),
+      monitorTunnel(tunnel.process, shutdown.signal),
+      exitAsFailure(tunnel.exit, "cloudflared exited while the Session was Ready."),
       waitForAbort(shutdown.signal),
     ]);
   } finally {
@@ -284,7 +324,7 @@ async function runSession(options, shutdown) {
     const serviceResult = serviceRun
       ? await serviceRun.finished.catch(() => undefined)
       : undefined;
-    await stopProcess(cloudflared, cloudflaredExit);
+    if (tunnel) await stopProcess(tunnel.process, tunnel.exit);
     try {
       unlinkSync(options.credentialFile);
     } catch (error) {
@@ -323,6 +363,15 @@ async function runSession(options, shutdown) {
         }
       }
     }
+    if (options.namedTunnelTokenFile) {
+      try {
+        unlinkSync(options.namedTunnelTokenFile);
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+          console.error("Named Tunnel token cleanup was incomplete.");
+        }
+      }
+    }
     console.log(ready ? "Session terminated; cleanup completed." : "Session startup terminated; cleanup completed.");
     if (shutdownWasRequested && serviceResult && "phase" in serviceResult) {
       throw new FixedSessionError(serviceResult.phase, serviceResult.summary);
@@ -330,8 +379,23 @@ async function runSession(options, shutdown) {
   }
 }
 
+/** @param {string} executable @param {string[]} arguments_ @param {BoundedLog} log */
+function startCloudflared(executable, arguments_, log) {
+  const processHandle = spawn(executable, arguments_, {
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  processHandle.stdout.on("data", (chunk) => log.append(chunk));
+  processHandle.stderr.on("data", (chunk) => log.append(chunk));
+  const exit = new Promise((resolvePromise) => {
+    processHandle.once("error", () => resolvePromise("error"));
+    processHandle.once("exit", (code) => resolvePromise(code));
+  });
+  return { process: processHandle, exit, address: "" };
+}
+
 /** @param {import("node:child_process").ChildProcess} processHandle @param {AbortSignal} signal */
-async function obtainSessionAddress(processHandle, signal) {
+async function obtainQuickTunnelAddress(processHandle, signal) {
   while (!signal.aborted) {
     if (processHandle.exitCode !== null) {
       throw new FixedSessionError("startup", "cloudflared exited during startup.");
@@ -347,6 +411,30 @@ async function obtainSessionAddress(processHandle, signal) {
     }
   }
   throw new FixedSessionError("startup", "Quick Tunnel address was not ready.");
+}
+
+/** @param {import("node:child_process").ChildProcess} processHandle @param {string} origin @param {AbortSignal} signal */
+async function obtainNamedTunnelAddress(processHandle, origin, signal) {
+  while (!signal.aborted) {
+    if (processHandle.exitCode !== null) {
+      throw new FixedSessionError("startup", "Named Tunnel connector exited during startup.");
+    }
+    try {
+      const response = await metricsRequest("/config");
+      return namedTunnelAddressFromConfig(response, origin);
+    } catch (error) {
+      if (error instanceof FixedSessionError) throw error;
+      if (error instanceof NamedTunnelConfigError) {
+        throw new FixedSessionError("startup", error.message);
+      }
+      if (error instanceof NamedTunnelConfigNotApplied) {
+        await delay(250, signal);
+        continue;
+      }
+      await delay(250, signal);
+    }
+  }
+  throw new FixedSessionError("startup", "Named Tunnel configuration was not readable.");
 }
 
 /** @param {unknown} candidate */
@@ -460,10 +548,10 @@ function locatorBlock(address, username) {
   return [...lines, ""].join("\n");
 }
 
-/** @param {Promise<unknown>} exit @param {string} summary @returns {Promise<never>} */
-async function exitAsFailure(exit, summary) {
+/** @param {Promise<unknown>} exit @param {string} summary @param {"startup" | "runtime"} [phase] @returns {Promise<never>} */
+async function exitAsFailure(exit, summary, phase = "runtime") {
   await exit;
-  throw new FixedSessionError("runtime", summary);
+  throw new FixedSessionError(phase, summary);
 }
 
 /** @param {Promise<import("./service-module.mjs").ServiceResult>} finished */
@@ -540,10 +628,12 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => shutdown.abort());
 }
 
+let parsedOptions;
 try {
-  const options = parseArguments(process.argv.slice(2));
-  await runSession(options, shutdown);
+  parsedOptions = parseArguments(process.argv.slice(2));
+  await runSession(parsedOptions, shutdown);
 } catch (error) {
+  if (parsedOptions?.namedTunnelTokenFile) removeInRunnerTemporaryStorage(parsedOptions.namedTunnelTokenFile);
   const failure = asFixedSessionError(error);
   writeFailureSummary(failure);
   console.error(failure.summary);

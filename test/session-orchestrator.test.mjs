@@ -235,7 +235,7 @@ async function exerciseOpenListStartupTimeout(localLoginHealthy) {
     { key: readFileSync(key), cert: readFileSync(databaseCa) },
     (_request, response) => response.writeHead(200).end("openlist"),
   );
-  await listen(local, 58082);
+  await listen(local, 58081);
   await listen(publicServer, 0);
   const address = publicServer.address();
   assert.ok(address && typeof address === "object");
@@ -433,7 +433,6 @@ test("WF-01 rejects removed workflow arguments", () => {
   try {
     for (const removedArgument of [
       ["--slot", "slot-1"],
-      ["--named-tunnel-token-file", join(root, "token")],
       ["--named-tunnel-url", "https://session.example.com"],
     ]) {
       const result = spawnSync(process.execPath, [...base, ...removedArgument], {
@@ -444,5 +443,131 @@ test("WF-01 rejects removed workflow arguments", () => {
     }
   } finally {
     rmSync(root, { recursive: true });
+  }
+});
+
+/** @param {object[]} ingress @param {{ exit?: boolean, unreadable?: boolean }} [scenario] */
+function exerciseNamedTunnelSelection(ingress, scenario = {}) {
+  const root = mkdtempSync(join(tmpdir(), "session-orchestrator-named-"));
+  const credentialFile = join(root, "session-credential");
+  const tokenFile = join(root, "cloudflare-tunnel-token");
+  const started = join(root, "started");
+  const summary = join(root, "summary");
+  const cloudflared = join(root, "cloudflared");
+  const history = join(root, "cloudflared-history");
+  const token = "named-tunnel-secret-value";
+  writeFileSync(credentialFile, "", { mode: 0o600 });
+  writeFileSync(tokenFile, token, { mode: 0o600 });
+  writeFileSync(started, `${Math.floor(Date.now() / 1000)}\n`);
+  copyFileSync(new URL("./fixtures/fake-cloudflared", import.meta.url).pathname, cloudflared);
+  chmodSync(cloudflared, 0o755);
+  const result = spawnSync(process.execPath, [
+    new URL("../src/session.mjs", import.meta.url).pathname,
+    "--service", "chrome",
+    "--credential-file", credentialFile,
+    "--cloudflared", cloudflared,
+    "--started-epoch-file", started,
+    "--named-tunnel-token-file", tokenFile,
+  ], {
+    env: {
+      ...process.env,
+      FAKE_CLOUDFLARED_ARGUMENTS_HISTORY: history,
+      FAKE_NAMED_TUNNEL_CONFIG: scenario.unreadable
+        ? ""
+        : JSON.stringify({ version: 3, config: { ingress } }),
+      FAKE_NAMED_TUNNEL_EXIT: scenario.exit ? "1" : "0",
+      FAKE_SESSION_ADDRESS: "session-test.trycloudflare.com",
+      GITHUB_STEP_SUMMARY: summary,
+      RUNNER_TEMP: root,
+      TSVC_TEST_STARTUP_TIMEOUT_MS: "1000",
+    },
+    encoding: "utf8",
+  });
+  const observable = `${result.stdout}${result.stderr}${readFileSync(summary, "utf8")}${readFileSync(history, "utf8")}`;
+  assert.doesNotMatch(observable, new RegExp(token));
+  assert.throws(() => statSync(tokenFile), { code: "ENOENT" });
+  return {
+    history: readFileSync(history, "utf8").trim().split("\n").map((line) => JSON.parse(line)),
+    observable,
+    result,
+    root,
+  };
+}
+
+test("TN-01 starts a named connector with token-file when the selected route exists", () => {
+  const exercised = exerciseNamedTunnelSelection([
+    { hostname: "chrome.example.com", service: "http://localhost:58080" },
+    { service: "http_status:404" },
+  ]);
+  try {
+    assert.equal(exercised.result.status, 1, exercised.observable);
+    assert.deepEqual(exercised.history, [[
+      "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:49312",
+      "run", "--token-file", join(exercised.root, "cloudflare-tunnel-token"),
+    ]]);
+    assert.match(exercised.observable, /Startup stage complete: Named Tunnel address\./);
+  } finally {
+    rmSync(exercised.root, { recursive: true });
+  }
+});
+
+test("TN-01 stops the named connector and falls back to Quick Tunnel only when no route exists", () => {
+  const exercised = exerciseNamedTunnelSelection([
+    { hostname: "openlist.example.com", service: "http://localhost:58081" },
+    { service: "http_status:404" },
+  ]);
+  try {
+    assert.equal(exercised.result.status, 1, exercised.observable);
+    assert.equal(exercised.history.length, 2);
+    assert.deepEqual(exercised.history[1], [
+      "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:49312",
+      "--url", "http://127.0.0.1:58080",
+    ]);
+    assert.match(exercised.observable, /starting Quick Tunnel/);
+    assert.match(exercised.observable, /Startup stage complete: Quick Tunnel address\./);
+  } finally {
+    rmSync(exercised.root, { recursive: true });
+  }
+});
+
+test("TN-01 reports a named connector exit without falling back", () => {
+  const exercised = exerciseNamedTunnelSelection([], { exit: true });
+  try {
+    assert.equal(exercised.result.status, 1, exercised.observable);
+    assert.equal(exercised.history.length, 1);
+    assert.match(exercised.observable, /Phase: startup/);
+    assert.match(exercised.observable, /Named Tunnel connector exited during startup\./);
+    assert.doesNotMatch(exercised.observable, /starting Quick Tunnel/);
+  } finally {
+    rmSync(exercised.root, { recursive: true });
+  }
+});
+
+test("TN-01 reports an unsafe selected route without falling back", () => {
+  const exercised = exerciseNamedTunnelSelection([
+    { hostname: "*.example.com", service: "http://localhost:58080" },
+    { service: "http_status:404" },
+  ]);
+  try {
+    assert.equal(exercised.result.status, 1, exercised.observable);
+    assert.equal(exercised.history.length, 1);
+    assert.match(exercised.observable, /Phase: startup/);
+    assert.match(exercised.observable, /must use one exact hostname without a path/);
+    assert.doesNotMatch(exercised.observable, /starting Quick Tunnel/);
+  } finally {
+    rmSync(exercised.root, { recursive: true });
+  }
+});
+
+test("TN-01 reports remote configuration that remains unreadable without falling back", () => {
+  const exercised = exerciseNamedTunnelSelection([], { unreadable: true });
+  try {
+    assert.equal(exercised.result.status, 1, exercised.observable);
+    assert.equal(exercised.history.length, 1);
+    assert.match(exercised.observable, /Phase: startup/);
+    assert.match(exercised.observable, /Named Tunnel configuration was not readable\./);
+    assert.doesNotMatch(exercised.observable, /starting Quick Tunnel/);
+  } finally {
+    rmSync(exercised.root, { recursive: true });
   }
 });

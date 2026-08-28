@@ -22,7 +22,7 @@ import { isSessionCredential } from "./session-credential.mjs";
 import { parseDatabase } from "./database.mjs";
 
 const ORIGIN_HOST = "127.0.0.1";
-const ORIGIN_PORTS = { chrome: 58080, openlist: 58082, "code-server": 58084 };
+const ORIGIN_PORTS = { chrome: 58080, openlist: 58081, "code-server": 58082 };
 const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_COMMAND_OUTPUT = 64 * 1024;
 const MAX_JSON_RESPONSE = 1024 * 1024;

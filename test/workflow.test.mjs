@@ -16,7 +16,7 @@ function stepScript(name, next) {
 
 test("WF-01 exposes only Chrome, OpenList, and Code Server", () => {
   assert.match(workflow, /options:\n\s+- chrome\n\s+- openlist\n\s+- code-server/);
-  assert.doesNotMatch(workflow, /58081|agalwood|operator-token/i);
+  assert.doesNotMatch(workflow, /agalwood|operator-token/i);
 });
 
 test("WF-01 rejects invalid raw dispatch values before checkout", () => {
@@ -73,7 +73,8 @@ test("WF-04 requires the OpenList database pair", () => {
 test("WF-01 keeps immutable execution policy", () => {
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   assert.match(workflow, /timeout-minutes: 330/);
-  assert.match(workflow, /group: \$\{\{ inputs\.service == 'openlist' && 'tsvc-serialized'/);
+  assert.match(workflow, /group: tsvc-serialized/);
+  assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683/);
   assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
   assert.match(workflow, /rclone\/rclone@sha256:b06aed988cf5967de7c25be5925240983981c757f4ed1ac9d2fa659d51d60548/);
@@ -107,4 +108,12 @@ test("CL-01 removes all staged sensitive and configuration files", () => {
   assert.match(workflow, /"\$RUNNER_TEMP\/rclone-mounts"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/database\.json"/);
   assert.match(workflow, /"\$RUNNER_TEMP\/database-ca\.pem"/);
+  assert.match(workflow, /"\$RUNNER_TEMP\/cloudflare-tunnel-token"/);
+});
+
+test("SC-05 stages and passes the optional Cloudflare Tunnel token by file", () => {
+  assert.match(workflow, /CLOUDFLARE_TUNNEL_TOKEN: \$\{\{ secrets\.CLOUDFLARE_TUNNEL_TOKEN \}\}/);
+  assert.match(workflow, /if \[\[ -n "\$CLOUDFLARE_TUNNEL_TOKEN" \]\]/);
+  assert.match(workflow, /stage-cloudflare-tunnel-token\.mjs "\$RUNNER_TEMP\/cloudflare-tunnel-token"/);
+  assert.match(workflow, /--named-tunnel-token-file "\$RUNNER_TEMP\/cloudflare-tunnel-token"/);
 });

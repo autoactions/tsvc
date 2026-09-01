@@ -44,6 +44,22 @@ function websocketStatus(service, path, headers) {
   });
 }
 
+/** @template T @param {() => Promise<T>} probe @param {number} [timeout] */
+async function waitForOrigin(probe, timeout = 60_000) {
+  const deadline = Date.now() + timeout;
+  /** @type {unknown} */
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      return await probe();
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError ?? new Error("origin did not become reachable");
+}
+
 /** @param {"chrome" | "openlist" | "code-server"} service @param {string} credential @param {string[]} [additionalSensitiveValues] */
 function assertLiveIsolation(service, credential, additionalSensitiveValues = []) {
   const ids = execFileSync("docker", ["ps", "--quiet", "--filter", `publish=${servicePort(service)}`], { encoding: "utf8" })
@@ -113,7 +129,10 @@ test("AU-01 pinned Chrome enforces native HTTP and GUI WebSocket authentication"
     const wrong = `Basic ${Buffer.from("session:wrong").toString("base64")}`;
     const correct = `Basic ${Buffer.from(`session:${sessionCredential}`).toString("base64")}`;
     assertLiveIsolation("chrome", sessionCredential);
-    assert.equal((await fetch("http://127.0.0.1:58080/", { headers: { authorization: wrong } })).status, 401);
+    assert.equal(
+      (await waitForOrigin(() => fetch("http://127.0.0.1:58080/", { headers: { authorization: wrong } }))).status,
+      401,
+    );
     assert.equal((await fetch("http://127.0.0.1:58080/", { headers: { authorization: correct } })).status, 200);
     assert.equal(await websocketStatus("chrome", "/websocket", { authorization: wrong }), 401);
     assert.equal(await websocketStatus("chrome", "/websocket", { authorization: correct }), 101);
@@ -136,7 +155,7 @@ test("AU-03 pinned OpenList authenticates with the current Session Credential", 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ username: "admin", password }),
     });
-    const rejected = await login("wrong-password");
+    const rejected = await waitForOrigin(() => login("wrong-password"));
     assert.notEqual((await rejected.json()).code, 200);
     const response = await login(sessionCredential);
     assert.equal(response.status, 200);
@@ -163,7 +182,7 @@ test("AU-04 pinned Code Server authenticates with the current Session Credential
   const live = await withLiveService("code-server");
   try {
     assertLiveIsolation("code-server", sessionCredential);
-    const response = await fetch("http://127.0.0.1:58082/login");
+    const response = await waitForOrigin(() => fetch("http://127.0.0.1:58082/login"));
     assert.equal(response.status, 200);
   } finally {
     live.cancellation.abort();

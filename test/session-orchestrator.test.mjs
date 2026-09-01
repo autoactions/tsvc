@@ -181,8 +181,7 @@ test("RD-01 gates the Session Address and reduces a later failure Summary", asyn
   }
 });
 
-/** @param {boolean} localLoginHealthy */
-async function exerciseOpenListStartupTimeout(localLoginHealthy) {
+async function exerciseOpenListStartupTimeout() {
   const root = mkdtempSync(join(tmpdir(), "session-orchestrator-openlist-timeout-"));
   const bin = join(root, "bin");
   const credentialFile = join(root, "session-credential");
@@ -214,32 +213,6 @@ async function exerciseOpenListStartupTimeout(localLoginHealthy) {
   chmodSync(cloudflared, 0o755);
   symlinkSync(new URL("./fixtures/fake-docker", import.meta.url).pathname, join(bin, "docker"));
 
-  const local = createServer((request, response) => {
-    if (request.method === "POST" && request.url === "/api/auth/login") {
-      let body = "";
-      request.setEncoding("utf8");
-      request.on("data", (chunk) => { body += chunk; });
-      request.on("end", () => {
-        const payload = JSON.parse(body);
-        if (localLoginHealthy && payload.username === "admin" && payload.password === credential) {
-          response.writeHead(200, { "content-type": "application/json" })
-            .end('{"code":200,"data":{"token":"test-token"}}');
-        } else response.writeHead(401).end('{"code":401}');
-      });
-    } else if (request.method === "GET" && request.url === "/api/public/offline_download_tools") {
-      response.writeHead(200, { "content-type": "application/json" })
-        .end('{"code":200,"message":"success","data":["aria2","SimpleHttp"]}');
-    } else response.writeHead(404).end();
-  });
-  const publicServer = createSecureServer(
-    { key: readFileSync(key), cert: readFileSync(databaseCa) },
-    (_request, response) => response.writeHead(200).end("openlist"),
-  );
-  await listen(local, 58081);
-  await listen(publicServer, 0);
-  const address = publicServer.address();
-  assert.ok(address && typeof address === "object");
-
   try {
     const child = spawn(process.execPath, [
       new URL("../src/session.mjs", import.meta.url).pathname,
@@ -253,11 +226,10 @@ async function exerciseOpenListStartupTimeout(localLoginHealthy) {
       env: {
         ...process.env,
         FAKE_DOCKER_LOG: dockerLog,
-        FAKE_SESSION_ADDRESS: `https://session-test.trycloudflare.com:${address.port}`,
+        FAKE_SESSION_ADDRESS: "https://session-test.trycloudflare.com",
         FAKE_TUNNEL_NOT_READY: "1",
         GITHUB_STEP_SUMMARY: summary,
         NODE_OPTIONS: `--require=${new URL("./fixtures/force-localhost.cjs", import.meta.url).pathname}`,
-        NODE_TLS_REJECT_UNAUTHORIZED: "0",
         PATH: `${bin}:${process.env.PATH}`,
         RUNNER_TEMP: root,
         TSVC_TEST_STARTUP_TIMEOUT_MS: "1000",
@@ -283,22 +255,12 @@ async function exerciseOpenListStartupTimeout(localLoginHealthy) {
       status: exitCode,
     };
   } finally {
-    await close(local);
-    await close(publicServer);
     rmSync(root, { recursive: true });
   }
 }
 
-test("FL-01 startup timeout preserves the local OpenList login diagnostic", async () => {
-  const { failureSummary, observable, status } = await exerciseOpenListStartupTimeout(false);
-  assert.equal(status, 1, observable);
-  assert.match(failureSummary, /Diagnostic: Local OpenList login was not ready\./);
-  assert.doesNotMatch(failureSummary, /five minutes/);
-  assert.doesNotMatch(observable, new RegExp(`${credential}|database_secret_value`));
-});
-
 test("FL-01 startup timeout reports a Quick Tunnel that never becomes ready", async () => {
-  const { failureSummary, observable, status } = await exerciseOpenListStartupTimeout(true);
+  const { failureSummary, observable, status } = await exerciseOpenListStartupTimeout();
   assert.equal(status, 1, observable);
   assert.match(failureSummary, /Diagnostic: Quick Tunnel was not ready\./);
   assert.doesNotMatch(failureSummary, /five minutes/);

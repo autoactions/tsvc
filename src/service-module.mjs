@@ -13,8 +13,6 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import http from "node:http";
-import https from "node:https";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 
@@ -25,7 +23,6 @@ const ORIGIN_HOST = "127.0.0.1";
 const ORIGIN_PORTS = { chrome: 58080, openlist: 58081, "code-server": 58082 };
 const MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_COMMAND_OUTPUT = 64 * 1024;
-const MAX_JSON_RESPONSE = 1024 * 1024;
 
 const CHROME_IMAGE =
   "lscr.io/linuxserver/chrome@sha256:49a019a04b8d38422609d3c586636293417f61886704d516b7d5233cb4bd0b12";
@@ -167,7 +164,7 @@ async function runLifecycle(options, ready, finished) {
     const container = resources.container;
     const containerExit = waitForContainerExit(container);
     await Promise.race([
-      waitForReadiness(resources, credential, options.cancellation),
+      waitForReadiness(resources, options.cancellation),
       containerExit.then(async () => {
         if (options.cancellation.aborted) return new Promise(() => {});
         throw new FixedServiceError("startup", "Selected Service exited during startup.");
@@ -180,7 +177,7 @@ async function runLifecycle(options, ready, finished) {
       ...(username ? { username } : {}),
     });
     await Promise.race([
-      supervise(resources, credential, options.cancellation),
+      supervise(resources, options.cancellation),
       containerExit.then(() => {
         if (options.cancellation.aborted) return new Promise(() => {});
         throw new FixedServiceError("runtime", "Selected Service exited.");
@@ -729,66 +726,25 @@ function openlistDockerArgs(resources) {
 
 /**
  * @param {OwnedResources} resources
- * @param {string} credential
  * @param {AbortSignal} cancellation
  */
-async function waitForReadiness(resources, credential, cancellation) {
-  let openlistFailure = "local";
-  let localLoginComplete = false;
-  while (!cancellation.aborted) {
-    if (resources.rclone?.processes.some(({ child }) => childFinished(child))) {
-      throw new FixedServiceError("startup", "Rclone mount exited during startup.");
-    }
-    if (!(await containerRunning(resources.container, cancellation))) {
-      if (cancellation.aborted) break;
-      throw new FixedServiceError("startup", "Selected Service exited during startup.");
-    }
-    if (resources.service === "openlist") {
-      try {
-        await openlistLocalLogin(credential);
-        if (!localLoginComplete) {
-          console.log("Startup stage complete: Local OpenList admin login.");
-          localLoginComplete = true;
-        }
-      } catch {
-        openlistFailure = "local";
-        await abortableDelay(1_000, cancellation);
-        continue;
-      }
-      try {
-        await openlistOfflineDownloadTools();
-      } catch {
-        openlistFailure = "offline-tools";
-        await abortableDelay(1_000, cancellation);
-        continue;
-      }
-      return;
-    }
-    try {
-      await requiredLocalHealth(resources.service, credential);
-      return;
-    } catch {
-      await abortableDelay(1_000, cancellation);
-    }
+async function waitForReadiness(resources, cancellation) {
+  if (cancellation.aborted) {
+    throw new FixedServiceError("startup", "Session startup was cancelled.");
   }
-  if (resources.service === "openlist") {
-    throw new FixedServiceError(
-      "startup",
-      openlistFailure === "local"
-        ? "Local OpenList login was not ready."
-        : "OpenList offline download tools were not ready.",
-    );
+  if (resources.rclone?.processes.some(({ child }) => childFinished(child))) {
+    throw new FixedServiceError("startup", "Rclone mount exited during startup.");
   }
-  throw new FixedServiceError("startup", "Session startup was cancelled.");
+  if (!(await containerRunning(resources.container, cancellation))) {
+    throw new FixedServiceError("startup", "Selected Service exited during startup.");
+  }
 }
 
 /**
  * @param {OwnedResources} resources
- * @param {string} credential
  * @param {AbortSignal} cancellation
  */
-async function supervise(resources, credential, cancellation) {
-  let unhealthySince;
+async function supervise(resources, cancellation) {
   while (!cancellation.aborted) {
     if (!(await containerRunning(resources.container, cancellation))) {
       if (cancellation.aborted) break;
@@ -798,171 +754,8 @@ async function supervise(resources, credential, cancellation) {
       throw new FixedServiceError("runtime", "Rclone mount exited.");
     }
     await assertFreeSpace();
-    try {
-      await requiredLocalHealth(resources.service, credential);
-      unhealthySince = undefined;
-    } catch {
-      unhealthySince ??= Date.now();
-      if (Date.now() - unhealthySince >= 30_000) {
-        throw new FixedServiceError("runtime", "A required Service health signal remained unhealthy.");
-      }
-    }
     await abortableDelay(1_000, cancellation);
   }
-}
-
-/** @param {Service} service @param {string} credential */
-async function requiredLocalHealth(service, credential) {
-  const localBase = `http://${ORIGIN_HOST}:${originPort(service)}`;
-  if (service === "chrome") {
-    const authorization = `Basic ${Buffer.from(`${CHROME_USERNAME}:${credential}`).toString("base64")}`;
-    await Promise.all([
-      httpStatus(`${localBase}/`, { authorization }),
-      websocketUpgrade(`${localBase}/websocket`, { authorization }),
-    ]);
-    return;
-  }
-  if (service === "code-server") {
-    await httpStatus(`${localBase}/login`, {});
-    return;
-  }
-  if (service === "openlist") {
-    await openlistLocalLogin(credential);
-    await openlistOfflineDownloadTools();
-    return;
-  }
-  throw new Error("invalid service");
-}
-
-/** @param {string} credential */
-async function openlistLocalLogin(credential) {
-  const login = await httpJson(
-    `http://${ORIGIN_HOST}:${originPort("openlist")}/api/auth/login`,
-    {},
-    "POST",
-    JSON.stringify({ username: OPENLIST_USERNAME, password: credential }),
-  );
-  if (
-    !login || typeof login !== "object" ||
-    /** @type {Record<string, unknown>} */ (login).code !== 200 ||
-    !/** @type {{ data?: { token?: unknown } }} */ (login).data ||
-    typeof /** @type {{ data: { token?: unknown } }} */ (login).data.token !== "string"
-  ) throw new Error("unhealthy");
-}
-
-async function openlistOfflineDownloadTools() {
-  const response = await httpJson(
-    `http://${ORIGIN_HOST}:${originPort("openlist")}/api/public/offline_download_tools`,
-    {},
-  );
-  const tools = response && typeof response === "object"
-    ? /** @type {{ code?: unknown, data?: unknown }} */ (response)
-    : undefined;
-  if (
-    tools?.code !== 200 || !Array.isArray(tools.data) ||
-    !tools.data.includes("aria2") || !tools.data.includes("SimpleHttp")
-  ) throw new Error("unhealthy");
-}
-
-/** @param {string} url @param {Record<string, string>} headers @param {string} [method] @param {string} [body] */
-function httpStatus(url, headers, method = "GET", body) {
-  /** @type {Promise<void>} */
-  return new Promise((resolvePromise, rejectPromise) => {
-    const parsed = new URL(url);
-    const transport = parsed.protocol === "https:" ? https : http;
-    const request = transport.request(parsed, {
-      headers: body ? { ...headers, "content-length": String(Buffer.byteLength(body)), "content-type": "application/json" } : headers,
-      method,
-      timeout: 5_000,
-    }, (response) => {
-      response.resume();
-      if ((response.statusCode ?? 500) >= 200 && (response.statusCode ?? 500) < 300) resolvePromise(undefined);
-      else rejectPromise(new Error("unhealthy"));
-    });
-    request.on("timeout", () => request.destroy(new Error("timeout")));
-    request.on("error", rejectPromise);
-    if (body) request.write(body);
-    request.end();
-  });
-}
-
-/** @param {string} url @param {Record<string, string>} headers @param {string} [method] @param {string} [body] @param {AbortSignal} [signal] */
-function httpJson(url, headers, method = "GET", body, signal) {
-  /** @type {Promise<unknown>} */
-  return new Promise((resolvePromise, rejectPromise) => {
-    const parsed = new URL(url);
-    const transport = parsed.protocol === "https:" ? https : http;
-    const request = transport.request(parsed, {
-      headers: body === undefined ? headers : {
-        ...headers,
-        "content-length": String(Buffer.byteLength(body)),
-        "content-type": "application/json",
-      },
-      method,
-      timeout: 5_000,
-    }, (response) => {
-      let output = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk) => {
-        output += chunk;
-        if (output.length > MAX_JSON_RESPONSE) response.destroy(new Error("response too large"));
-      });
-      response.on("end", () => {
-        signal?.removeEventListener("abort", cancel);
-        if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
-          rejectPromise(new Error("unhealthy"));
-          return;
-        }
-        try {
-          resolvePromise(JSON.parse(output));
-        } catch {
-          rejectPromise(new Error("unhealthy"));
-        }
-      });
-    });
-    const cancel = () => request.destroy(new Error("cancelled"));
-    request.on("timeout", () => request.destroy(new Error("timeout")));
-    request.on("error", (error) => {
-      signal?.removeEventListener("abort", cancel);
-      rejectPromise(error);
-    });
-    if (signal) {
-      if (signal.aborted) cancel();
-      else signal.addEventListener("abort", cancel, { once: true });
-    }
-    if (body !== undefined) request.write(body);
-    request.end();
-  });
-}
-
-/** @param {string} url @param {Record<string, string>} headers */
-function websocketUpgrade(url, headers) {
-  /** @type {Promise<void>} */
-  return new Promise((resolvePromise, rejectPromise) => {
-    const parsed = new URL(url);
-    const transport = parsed.protocol === "https:" ? https : http;
-    const request = transport.request(parsed, {
-      headers: {
-        ...headers,
-        connection: "Upgrade",
-        upgrade: "websocket",
-        "sec-websocket-key": randomBytes(16).toString("base64"),
-        "sec-websocket-version": "13",
-      },
-      timeout: 5_000,
-    });
-    request.once("upgrade", (_response, socket) => {
-      socket.destroy();
-      resolvePromise(undefined);
-    });
-    request.once("response", (response) => {
-      response.resume();
-      rejectPromise(new Error("upgrade rejected"));
-    });
-    request.on("timeout", () => request.destroy(new Error("timeout")));
-    request.on("error", rejectPromise);
-    request.end();
-  });
 }
 
 /** @param {string} container @param {AbortSignal} cancellation */
